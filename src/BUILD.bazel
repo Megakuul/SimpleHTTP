@@ -1,6 +1,7 @@
 cc_library(
     name = "simplehttp",
     hdrs = glob(["*.hpp"]),
+    copts = ["-std=c++23"],
     target_compatible_with = [
         "@platforms//cpu:x86_64",
         "@platforms//os:linux",

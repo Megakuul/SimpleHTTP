@@ -49,9 +49,12 @@ namespace SimpleHTTP {
 			// Initialize bsd socket
 			sockfd = socket(domain, type, protocol);
 			if (sockfd < 0) {	
-				throw runtime_error(format("Failed to launch HTTP server ({}):\n{}",
-																	 "socket registration",
-																	 strerror(errno)));
+				throw runtime_error(
+				  format(
+					  "Failed to launch HTTP server ({}):\n{}",
+						"socket registration",strerror(errno)
+				  )
+			  );
 			}
 		};
 		Socket(Socket&& other) noexcept : sockfd(other.sockfd) {
@@ -91,34 +94,85 @@ namespace SimpleHTTP {
 	 */
 	class Server {
 	public:
+		Server() = delete;
+		
 		Server(string unixSockPath) : socket(AF_UNIX, SOCK_STREAM, 0) {
 			fs::create_directories(fs::path(unixSockPath).parent_path());
 		};
 
+		/**
+		 * Launch Server using kernel network stack
+		 *
+		 * Multiple instances of this server can be launched in parallel to increase performance.
+		 * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
+		 */
 		Server(string ipAddr, u_int16_t port) : socket(AF_INET, SOCK_STREAM, 0) {
+			// Clean socketAddr, 'cause maybe some weird libs
+			// still expect it to zero out sin_zero (which C++ does not do by def)
+			memset(&socketAddr, 0, sizeof(socketAddr));
+			// Set socketAddr options
 			socketAddr.sin_family = AF_INET;
 			socketAddr.sin_port = htons(port);
+			// Parse IPv4 addr and insert it to socketAddr
 			int res = inet_pton(AF_INET, ipAddr.c_str(), &socketAddr);
 			if (res==0) {
-				throw logic_error(format("Failed to launch HTTP server ({}):\n{}",
-																 "addr parsing",
-																 "Invalid IP-Address format"));
+				throw logic_error(
+				  format(
+						"Failed to launch HTTP server ({}):\n{}",
+						"addr parsing", "Invalid IP-Address format"
+				  )
+			  );
 			} else if (res==-1) {
-				throw runtime_error(format("Failed to launch HTTP server ({}):\n{}",
-																	 "addr parsing",
-																	 strerror(errno)));
+				throw runtime_error(
+				  format(
+						"Failed to launch HTTP server ({}):\n{}",
+						"addr parsing", strerror(errno)
+				  )
+			  );
 			}
 
-			res = setsockopt(socket.sock(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, // TODO);
+			// SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
+			// SO_REUSEPORT = Enable to cluster (lb) multiple bsd sockets with same ip + port combination
+			int opt = 1; // opt 1 indicates that the options should be enabled
+			res = setsockopt(socket.sock(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+			if (res < 0) {
+				throw runtime_error(
+				  format(
+					  "Failed to launch HTTP server ({}):\n{}",
+						"set socket options", strerror(errno)
+				  )
+			  );
+			}
+			
+			// Set socket recv and send buffer (should match a regular HTTP package for optimal performance)
+			res = setsockopt(socket.sock(), SOL_SOCKET, SO_SNDBUF, &socketBufferSize, sizeof(socketBufferSize));
+			if (res < 0) {
+				throw runtime_error(
+				  format(
+					  "Failed to launch HTTP server ({}):\n{}",
+						"set socket options", strerror(errno)
+				  )
+			  );
+			}
+
+			// Bind socket to specified addr
+			res = bind(socket.sock(), (struct sockaddr *)&socketAddr, sizeof(socketAddr));
+			if (res < 0) {
+				throw runtime_error(
+				  format(
+					  "Failed to launch HTTP server ({}):\n{}",
+						"bind socket", strerror(errno)
+				  )
+			  );
+			}
+
+			// Socket is closed automatically in destructor, because Socket is RAII compatible.
 		};
-
-		
-
-		
 
 	private:
 		Socket socket;
 		struct sockaddr_in socketAddr;
+		int socketBufferSize = 8192;
 	};
 
 }
