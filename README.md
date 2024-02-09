@@ -1,3 +1,5 @@
 # SimpleHTTP
 
-Extremly simple and fast C++ HTTP library based only on `stdc++23`.
+![SimpleHTTP Icon](/simplehttp.svg "SimpleHTTP")
+
+Extremly simple and fast C++ HTTP library.
