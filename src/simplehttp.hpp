@@ -51,7 +51,7 @@ namespace SimpleHTTP {
 			if (sockfd < 0) {	
 				throw runtime_error(
 				  format(
-					  "Failed to launch HTTP server ({}):\n{}",
+					  "Failed to initialize HTTP server ({}):\n{}",
 						"socket registration",strerror(errno)
 				  )
 			  );
@@ -98,6 +98,8 @@ namespace SimpleHTTP {
 		
 		Server(string unixSockPath) : socket(AF_UNIX, SOCK_STREAM, 0) {
 			fs::create_directories(fs::path(unixSockPath).parent_path());
+
+			
 		};
 
 		/**
@@ -107,25 +109,25 @@ namespace SimpleHTTP {
 		 * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
 		 */
 		Server(string ipAddr, u_int16_t port) : socket(AF_INET, SOCK_STREAM, 0) {
-			// Clean socketAddr, 'cause maybe some weird libs
+			// Clean inSockAddr, 'cause maybe some weird libs
 			// still expect it to zero out sin_zero (which C++ does not do by def)
-			memset(&socketAddr, 0, sizeof(socketAddr));
-			// Set socketAddr options
-			socketAddr.sin_family = AF_INET;
-			socketAddr.sin_port = htons(port);
-			// Parse IPv4 addr and insert it to socketAddr
-			int res = inet_pton(AF_INET, ipAddr.c_str(), &socketAddr);
+			memset(&inSockAddr, 0, sizeof(inSockAddr));
+			// Set inSockAddr options
+			inSockAddr.sin_family = AF_INET;
+			inSockAddr.sin_port = htons(port);
+			// Parse IPv4 addr and insert it to inSockAddr
+			int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr);
 			if (res==0) {
 				throw logic_error(
 				  format(
-						"Failed to launch HTTP server ({}):\n{}",
+						"Failed to initialize HTTP server ({}):\n{}",
 						"addr parsing", "Invalid IP-Address format"
 				  )
 			  );
 			} else if (res==-1) {
 				throw runtime_error(
 				  format(
-						"Failed to launch HTTP server ({}):\n{}",
+						"Failed to initialize HTTP server ({}):\n{}",
 						"addr parsing", strerror(errno)
 				  )
 			  );
@@ -138,41 +140,61 @@ namespace SimpleHTTP {
 			if (res < 0) {
 				throw runtime_error(
 				  format(
-					  "Failed to launch HTTP server ({}):\n{}",
+					  "Failed to initialize HTTP server ({}):\n{}",
 						"set socket options", strerror(errno)
 				  )
 			  );
 			}
 			
-			// Set socket recv and send buffer (should match a regular HTTP package for optimal performance)
+			// Set socket recv buffer (should match a regular HTTP package for optimal performance)
+			res = setsockopt(socket.sock(), SOL_SOCKET, SO_RCVBUF, &socketBufferSize, sizeof(socketBufferSize));
+			if (res < 0) {
+				throw runtime_error(
+				  format(
+					  "Failed to initialize HTTP server ({}):\n{}",
+						"set socket options", strerror(errno)
+				  )
+			  );
+			}
+			// Set socket send buffer (should match a regular HTTP package for optimal performance)
 			res = setsockopt(socket.sock(), SOL_SOCKET, SO_SNDBUF, &socketBufferSize, sizeof(socketBufferSize));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
-					  "Failed to launch HTTP server ({}):\n{}",
+					  "Failed to initialize HTTP server ({}):\n{}",
 						"set socket options", strerror(errno)
 				  )
 			  );
 			}
 
 			// Bind socket to specified addr
-			res = bind(socket.sock(), (struct sockaddr *)&socketAddr, sizeof(socketAddr));
+			res = bind(socket.sock(), (struct sockaddr *)&inSockAddr, sizeof(inSockAddr));
 			if (res < 0) {
 				throw runtime_error(
-				  format(
-					  "Failed to launch HTTP server ({}):\n{}",
+          format(
+					  "Failed to initialize HTTP server ({}):\n{}",
 						"bind socket", strerror(errno)
-				  )
+          )
 			  );
 			}
 
 			// Socket is closed automatically in destructor, because Socket is RAII compatible.
 		};
+		
+		Serve() {
+			
+		};
 
 	private:
 		Socket socket;
-		struct sockaddr_in socketAddr;
+		// INET socket Addr
+		struct sockaddr_in inSockAddr;
+		// Unix socket Addr
+		struct sockaddr_un unSockAddr;
+		// Size of the Send / Recv buffer in bytes
 		int socketBufferSize = 8192;
+		// Size of waiting incomming connections before connections are refused
+		int socketQueueSize = 128;
 	};
 
 }
