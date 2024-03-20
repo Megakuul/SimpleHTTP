@@ -1,7 +1,7 @@
 name: e2e-tests
 
 on:
-  pull_requests:
+  pull_request:
     
 jobs:
   basic_http_tests:
