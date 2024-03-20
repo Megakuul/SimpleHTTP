@@ -1,0 +1,26 @@
+name: e2e-tests
+
+on:
+  pull_requests:
+    
+jobs:
+  basic_http_tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup environment
+      run: |
+        apt install -y apt-transport-https curl gnupg
+        curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
+        sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+        apt update -y
+        apt install bazel -y
+        
+    - name: Run basic test with unix socket
+      run: |
+        bazel test //test:basic_http_unix
+
+    - name: Run basic test with tcp socket
+      run: |
+        bazel test //test:basic_http_tcp

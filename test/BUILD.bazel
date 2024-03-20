@@ -1,6 +1,13 @@
 cc_test(
-    name = "simplehttp_test",
-    srcs = glob(["*.cpp"]),
+    name = "basic_http_tcp",
+    srcs = glob(["basic_http_tcp.cpp"]),
+    copts = ["-std=c++23"],
+    deps = ["//src:simplehttp"],
+)
+
+cc_test(
+    name = "basic_http_unix",
+    srcs = glob(["basic_http_unix.cpp"]),
     copts = ["-std=c++23"],
     deps = ["//src:simplehttp"],
 )

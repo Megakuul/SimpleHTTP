@@ -1,0 +1,6 @@
+cc_binary(
+    name = "serve",
+    srcs = glob(["serve.cpp"]),
+    copts = ["-std=c++23"],
+    deps = ["//src:simplehttp"],
+)

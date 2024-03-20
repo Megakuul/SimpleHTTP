@@ -181,8 +181,8 @@ namespace SimpleHTTP {
 			// Socket is closed automatically in destructor, because Socket is RAII compatible.
 		};
 		
-		Serve() {
-			
+		void Serve() {
+      return;
 		};
 
 	private:
