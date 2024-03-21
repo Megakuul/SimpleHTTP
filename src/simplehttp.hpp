@@ -21,6 +21,8 @@
 #define SIMPLEHTTP_H
 
 #include <asm-generic/socket.h>
+#include <cstring>
+#include <stdexcept>
 #include <string>
 #include <filesystem>
 #include <format>
@@ -29,6 +31,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/un.h>
+#include <sys/epoll.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 
@@ -95,11 +99,61 @@ namespace SimpleHTTP {
 	class Server {
 	public:
 		Server() = delete;
-		
+
+    /**
+     * Launch Server using unix socket
+     */
 		Server(string unixSockPath) : socket(AF_UNIX, SOCK_STREAM, 0) {
 			fs::create_directories(fs::path(unixSockPath).parent_path());
+      // Clean up socket, errors are ignored, if the socket cannot be cleaned up, it will fail at bind() which is fine
+      unlink(unixSockPath.c_str());
 
-			
+      // Create sockaddr_un for convenient option setting
+      struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&sockAddr;
+      // Clean unSockAddr, 'cause maybe some weird libs
+			// still expect it to zero out sin_zero (which C++ does not do by def)
+      memset(unSockAddr, 0, sizeof(*unSockAddr));
+      // Set unSockAddr options
+      unSockAddr->sun_family = AF_UNIX;
+      strcpy(unSockAddr->sun_path, unixSockPath.c_str());
+
+      // Bind unix socket
+			int res = bind(socket.sock(), &sockAddr, sizeof(sockAddr));
+			if (res < 0) {
+				throw runtime_error(
+          format(
+					  "Failed to initialize HTTP server ({}):\n{}",
+						"bind socket", strerror(errno)
+          )
+			  );
+			}
+
+      // Retrieve current flags
+      sockFlags = fcntl(socket.sock(), F_GETFL, 0);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+						"read socket flags", strerror(errno)
+          )
+        );
+      }
+
+      // Add nonblocking flag
+      sockFlags = sockFlags | O_NONBLOCK;
+
+      // Set flags for core socket
+      res = fcntl(socket.sock(), F_SETFL, sockFlags);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+						"update socket flags", strerror(errno)
+          )
+        );
+      }
+      
+      // Socket is closed automatically in destructor, because Socket is RAII compatible.
 		};
 
 		/**
@@ -109,14 +163,17 @@ namespace SimpleHTTP {
 		 * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
 		 */
 		Server(string ipAddr, u_int16_t port) : socket(AF_INET, SOCK_STREAM, 0) {
+      // Create sockaddr_in for convenient option setting
+      struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&sockAddr;
 			// Clean inSockAddr, 'cause maybe some weird libs
 			// still expect it to zero out sin_zero (which C++ does not do by def)
-			memset(&inSockAddr, 0, sizeof(inSockAddr));
+			memset(inSockAddr, 0, sizeof(*inSockAddr));
 			// Set inSockAddr options
-			inSockAddr.sin_family = AF_INET;
-			inSockAddr.sin_port = htons(port);
+			inSockAddr->sin_family = AF_INET;
+			inSockAddr->sin_port = htons(port);
+      
 			// Parse IPv4 addr and insert it to inSockAddr
-			int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr);
+			int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr->sin_addr);
 			if (res==0) {
 				throw logic_error(
 				  format(
@@ -168,7 +225,7 @@ namespace SimpleHTTP {
 			}
 
 			// Bind socket to specified addr
-			res = bind(socket.sock(), (struct sockaddr *)&inSockAddr, sizeof(inSockAddr));
+			res = bind(socket.sock(), &sockAddr, sizeof(sockAddr));
 			if (res < 0) {
 				throw runtime_error(
           format(
@@ -178,23 +235,79 @@ namespace SimpleHTTP {
 			  );
 			}
 
+      // Retrieve current flags
+      sockFlags = fcntl(socket.sock(), F_GETFL, 0);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+						"read socket flags", strerror(errno)
+          )
+        );
+      }
+
+      // Add nonblocking flag
+      sockFlags = sockFlags | O_NONBLOCK;
+
+      // Set flags for core socket
+      res = fcntl(socket.sock(), F_SETFL, sockFlags);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+						"update socket flags", strerror(errno)
+          )
+        );
+      }
+
 			// Socket is closed automatically in destructor, because Socket is RAII compatible.
 		};
 		
 		void Serve() {
+      int res = listen(socket.sock(), socketQueueSize);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "start listener", strerror(errno)
+          )
+        );
+      }
+
+      // TODO use fucking io_uring
+
+      int event_fd = epoll_create1(0);
+      if (event_fd < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create epoll instance", strerror(errno)
+          )
+        );
+      }
+      
+      while (1) {
+        // TODO implement epoll logic
+
+        // accept()
+        // epoll_wait()
+        // Handlestuff
+
+        
+      }
       return;
 		};
 
 	private:
 		Socket socket;
-		// INET socket Addr
-		struct sockaddr_in inSockAddr;
-		// Unix socket Addr
-		struct sockaddr_un unSockAddr;
+    // Socket addr
+    struct sockaddr sockAddr;
+    // Main socket flags
+    int sockFlags;
 		// Size of the Send / Recv buffer in bytes
-		int socketBufferSize = 8192;
+		const int socketBufferSize = 8192;
 		// Size of waiting incomming connections before connections are refused
-		int socketQueueSize = 128;
+		const int socketQueueSize = 128;
 	};
 
 }
