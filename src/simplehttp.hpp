@@ -23,7 +23,6 @@
 #include <asm-generic/socket.h>
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <filesystem>
@@ -124,7 +123,7 @@ namespace SimpleHTTP {
 			}
       
       // Create sockaddr_un for convenient option setting
-      struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&sockAddr;
+      struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&coreSockAddr;
       // Clean unSockAddr, 'cause maybe some weird libs
 			// still expect it to zero out sin_zero (which C++ does not do by def)
       memset(unSockAddr, 0, sizeof(*unSockAddr));
@@ -133,7 +132,7 @@ namespace SimpleHTTP {
       strcpy(unSockAddr->sun_path, unixSockPath.c_str());
 
       // Bind unix socket
-			int res = bind(coreSocket.getfd(), &sockAddr, sizeof(sockAddr));
+			int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
 			if (res < 0) {
 				throw runtime_error(
           format(
@@ -179,7 +178,7 @@ namespace SimpleHTTP {
 		 */
 		Server(string ipAddr, u_int16_t port) {
       // Create sockaddr_in for convenient option setting
-      struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&sockAddr;
+      struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&coreSockAddr;
 			// Clean inSockAddr, 'cause maybe some weird libs
 			// still expect it to zero out sin_zero (which C++ does not do by def)
 			memset(inSockAddr, 0, sizeof(*inSockAddr));
@@ -230,7 +229,7 @@ namespace SimpleHTTP {
 			}
 			
 			// Set socket recv buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &socketBufferSize, sizeof(socketBufferSize));
+			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &sockBufferSize, sizeof(sockBufferSize));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
@@ -240,7 +239,7 @@ namespace SimpleHTTP {
 			  );
 			}
 			// Set socket send buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &socketBufferSize, sizeof(socketBufferSize));
+			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &sockBufferSize, sizeof(sockBufferSize));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
@@ -251,7 +250,7 @@ namespace SimpleHTTP {
 			}
 
 			// Bind socket to specified addr
-			res = bind(coreSocket.getfd(), &sockAddr, sizeof(sockAddr));
+			res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
 			if (res < 0) {
 				throw runtime_error(
           format(
@@ -291,7 +290,7 @@ namespace SimpleHTTP {
 		
 		void Serve() {
       // Start listener on core socket
-      int res = listen(coreSocket.getfd(), socketQueueSize);
+      int res = listen(coreSocket.getfd(), sockQueueSize);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -302,8 +301,8 @@ namespace SimpleHTTP {
       }
 
       // Create epoll instance
-      int epoll_fd = epoll_create1(0);
-      if (epoll_fd < 0) {
+      FileDescriptor epollSocket(epoll_create1(0));
+      if (epollSocket.getfd() < 0) {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
@@ -311,7 +310,6 @@ namespace SimpleHTTP {
           )
         );
       }
-      FileDescriptor epollSocket(epoll_fd);
 
       // Add core socket to epoll instance
       // This is just used to inform the epoll_ctl which events we are interested in
@@ -321,7 +319,7 @@ namespace SimpleHTTP {
       sockEvent.events = EPOLLIN;
       sockEvent.data.fd = coreSocket.getfd();
       
-      res = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, coreSocket.getfd(), &sockEvent);
+      res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &sockEvent);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -338,11 +336,11 @@ namespace SimpleHTTP {
       while (1) {
         // Wait for any epoll event (includes core socket and connections)
         // The -1 timeout means that it waits indefinitely until a event is reported
-        int n = epoll_wait(epoll_fd, conEvents, maxEventsPerLoop, -1);
+        int n = epoll_wait(epollSocket.getfd(), conEvents, maxEventsPerLoop, -1);
         if (n < 0) {
           throw runtime_error(
             format(
-              "Failed to run HTTP server ({}):\n{}",
+              "Critical failure while running HTTP server ({}):\n{}",
               "wait for incoming events", strerror(errno)
             )
           );
@@ -351,6 +349,45 @@ namespace SimpleHTTP {
         for (int i = 0; i < n; i++) {
           // If the event is from the core socket
           if (conEvents[n].data.fd == coreSocket.getfd()) {
+            // Check if error occured, if yes fetch it and return
+            // For simplicity reasons there is currently no http 500 response here
+            // instead sockets are closed leading to hangup signal on the client
+            if (conEvents[n].events & EPOLLERR) {
+              int err = 0;
+              socklen_t errlen = sizeof(err);
+              // Read error from sockopt
+              res = getsockopt(conEvents[n].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
+              // If getsockopt failed, return unknown error
+              if (res < 0) {
+                throw runtime_error(
+                  format(
+                    "Critical failure while running HTTP server ({}):\n{}",
+                    "error on core socket", "Unknown error"
+                  )
+                );
+              } else {
+                // If getsockopt succeeded, return error
+                throw runtime_error(
+                  format(
+                    "Critical failure while running HTTP server ({}):\n{}",
+                    "error on core socket", strerror(err)
+                  )
+                );
+              }
+              // Check if socket hang up (happens if e.g. fd is closed)
+              // Socket hang up is expected and therefore the loop is closed without errors
+              if (conEvents[n].events & EPOLLHUP) {
+                return;
+              }
+
+              // Accept new connection if any
+              struct sockaddr conSockAddr = coreSockAddr;
+              socklen_t conSockLen = sizeof(conSockAddr);
+              int conSocket = accept(coreSocket.getfd(), &conSockAddr, &conSockLen);
+              // Think about how to handle this
+            }
+            // Handle case for other connections
+            
             // First check if error, if yes fail
             // Second check pollin and accept connections
             continue;
@@ -367,13 +404,13 @@ namespace SimpleHTTP {
     // Core bsd socket
 		FileDescriptor coreSocket;
     // Socket addr
-    struct sockaddr sockAddr;
-    // Main socket flags
+    struct sockaddr coreSockAddr;
+    // Socket flags
     int sockFlags;
 		// Size of the Send / Recv buffer in bytes
-		const int socketBufferSize = 8192;
+		const int sockBufferSize = 8192;
 		// Size of waiting incomming connections before connections are refused
-		const int socketQueueSize = 128;
+		const int sockQueueSize = 128;
     // Defines the maximum epoll events handled in one loop iteration
     const int maxEventsPerLoop = 12;
 	};
