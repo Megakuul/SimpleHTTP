@@ -21,7 +21,9 @@
 #define SIMPLEHTTP_H
 
 #include <asm-generic/socket.h>
+#include <cerrno>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <filesystem>
@@ -43,50 +45,52 @@ namespace fs = filesystem;
 namespace SimpleHTTP {
 
 	/**
-	 * RAII compatible bsd socket filedescriptor wrapper
+	 * RAII compatible filedescriptor wrapper
 	 *
-	 * Exceptions: runtime_error
+   * Essentially just closes the filedescriptor on destruction
 	 */
-	class Socket {
+	class FileDescriptor {
 	public:
-		Socket(int domain, int type, int protocol) {
-			// Initialize bsd socket
-			sockfd = socket(domain, type, protocol);
-			if (sockfd < 0) {	
-				throw runtime_error(
-				  format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"socket registration",strerror(errno)
-				  )
-			  );
-			}
-		};
-		Socket(Socket&& other) noexcept : sockfd(other.sockfd) {
+    // Default constructor puts descriptor into invalid state (-1)
+    FileDescriptor() : fd(-1) {};
+    
+    FileDescriptor(int fd) : fd(fd) {};
+    // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
+		FileDescriptor(FileDescriptor&& other) noexcept : fd(other.fd) {
 			if (this != &other) {
-				other.sockfd = -1;
+				other.fd = -1;
 			}
 		};
 		// Copy constructor is deleted, socket cannot be copied
-		Socket(const Socket&) noexcept = delete;
-		
-		Socket& operator=(Socket&& other) noexcept {
+		FileDescriptor(const FileDescriptor&) noexcept = delete;
+    
+    // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior		
+		FileDescriptor& operator=(FileDescriptor&& other) noexcept {
 			if (this != &other) {
-				sockfd = other.sockfd;
-				other.sockfd = -1;
+        // If other fd is not the same, close the original fd on this object
+        if (other.fd!=fd) {
+          close(fd);
+        }
+				fd = other.fd;
+				other.fd = -1;
 			}
+      return *this;
 		};
 		// Copy assignment is deleted, socket cannot be copied
-		Socket& operator=(const Socket&) noexcept = delete;
+		FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
 		
-		~Socket() {
-			close(sockfd);
+		~FileDescriptor() {
+			close(fd);
 		};
 
-		const int sock() noexcept {
-			return sockfd;
+    /**
+     * Returns filedescriptor
+     */
+		int getfd() const noexcept {
+			return fd;
 		}
 	private:
-		int sockfd;
+		int fd;
 	};
 
 	/**
@@ -103,11 +107,22 @@ namespace SimpleHTTP {
     /**
      * Launch Server using unix socket
      */
-		Server(string unixSockPath) : socket(AF_UNIX, SOCK_STREAM, 0) {
+		Server(string unixSockPath) {
 			fs::create_directories(fs::path(unixSockPath).parent_path());
       // Clean up socket, errors are ignored, if the socket cannot be cleaned up, it will fail at bind() which is fine
       unlink(unixSockPath.c_str());
 
+      // Initialize core socket
+      coreSocket = FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
+      if (coreSocket.getfd() < 0) {
+				throw runtime_error(
+          format(
+					  "Failed to initialize HTTP server ({}):\n{}",
+						"create socket", strerror(errno)
+          )
+			  );
+			}
+      
       // Create sockaddr_un for convenient option setting
       struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&sockAddr;
       // Clean unSockAddr, 'cause maybe some weird libs
@@ -118,7 +133,7 @@ namespace SimpleHTTP {
       strcpy(unSockAddr->sun_path, unixSockPath.c_str());
 
       // Bind unix socket
-			int res = bind(socket.sock(), &sockAddr, sizeof(sockAddr));
+			int res = bind(coreSocket.getfd(), &sockAddr, sizeof(sockAddr));
 			if (res < 0) {
 				throw runtime_error(
           format(
@@ -129,7 +144,7 @@ namespace SimpleHTTP {
 			}
 
       // Retrieve current flags
-      sockFlags = fcntl(socket.sock(), F_GETFL, 0);
+      sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -143,7 +158,7 @@ namespace SimpleHTTP {
       sockFlags = sockFlags | O_NONBLOCK;
 
       // Set flags for core socket
-      res = fcntl(socket.sock(), F_SETFL, sockFlags);
+      res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -162,7 +177,7 @@ namespace SimpleHTTP {
 		 * Multiple instances of this server can be launched in parallel to increase performance.
 		 * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
 		 */
-		Server(string ipAddr, u_int16_t port) : socket(AF_INET, SOCK_STREAM, 0) {
+		Server(string ipAddr, u_int16_t port) {
       // Create sockaddr_in for convenient option setting
       struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&sockAddr;
 			// Clean inSockAddr, 'cause maybe some weird libs
@@ -190,10 +205,21 @@ namespace SimpleHTTP {
 			  );
 			}
 
+      // Initialize core socket
+      coreSocket = FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
+      if (coreSocket.getfd() < 0) {
+				throw runtime_error(
+          format(
+					  "Failed to initialize HTTP server ({}):\n{}",
+						"create socket", strerror(errno)
+          )
+			  );
+			}
+
 			// SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
 			// SO_REUSEPORT = Enable to cluster (lb) multiple bsd sockets with same ip + port combination
 			int opt = 1; // opt 1 indicates that the options should be enabled
-			res = setsockopt(socket.sock(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
@@ -204,7 +230,7 @@ namespace SimpleHTTP {
 			}
 			
 			// Set socket recv buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(socket.sock(), SOL_SOCKET, SO_RCVBUF, &socketBufferSize, sizeof(socketBufferSize));
+			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &socketBufferSize, sizeof(socketBufferSize));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
@@ -214,7 +240,7 @@ namespace SimpleHTTP {
 			  );
 			}
 			// Set socket send buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(socket.sock(), SOL_SOCKET, SO_SNDBUF, &socketBufferSize, sizeof(socketBufferSize));
+			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &socketBufferSize, sizeof(socketBufferSize));
 			if (res < 0) {
 				throw runtime_error(
 				  format(
@@ -225,7 +251,7 @@ namespace SimpleHTTP {
 			}
 
 			// Bind socket to specified addr
-			res = bind(socket.sock(), &sockAddr, sizeof(sockAddr));
+			res = bind(coreSocket.getfd(), &sockAddr, sizeof(sockAddr));
 			if (res < 0) {
 				throw runtime_error(
           format(
@@ -236,7 +262,7 @@ namespace SimpleHTTP {
 			}
 
       // Retrieve current flags
-      sockFlags = fcntl(socket.sock(), F_GETFL, 0);
+      sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -247,10 +273,10 @@ namespace SimpleHTTP {
       }
 
       // Add nonblocking flag
-      sockFlags = sockFlags | O_NONBLOCK;
+      sockFlags = sockFlags; // | O_NONBLOCK;
 
       // Set flags for core socket
-      res = fcntl(socket.sock(), F_SETFL, sockFlags);
+      res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -264,7 +290,8 @@ namespace SimpleHTTP {
 		};
 		
 		void Serve() {
-      int res = listen(socket.sock(), socketQueueSize);
+      // Start listener on core socket
+      int res = listen(coreSocket.getfd(), socketQueueSize);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -274,10 +301,9 @@ namespace SimpleHTTP {
         );
       }
 
-      // TODO use fucking io_uring
-
-      int event_fd = epoll_create1(0);
-      if (event_fd < 0) {
+      // Create epoll instance
+      int epoll_fd = epoll_create1(0);
+      if (epoll_fd < 0) {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
@@ -285,21 +311,61 @@ namespace SimpleHTTP {
           )
         );
       }
+      FileDescriptor epollSocket(epoll_fd);
+
+      // Add core socket to epoll instance
+      // This is just used to inform the epoll_ctl which events we are interested in
+      // sock_event is not manipulated by the epoll_ctl syscall
+      struct epoll_event sockEvent;
+      // On core socket we are only interested in readable state, there is no need for any writes to it
+      sockEvent.events = EPOLLIN;
+      sockEvent.data.fd = coreSocket.getfd();
       
-      while (1) {
-        // TODO implement epoll logic
-
-        // accept()
-        // epoll_wait()
-        // Handlestuff
-
-        
+      res = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, coreSocket.getfd(), &sockEvent);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "add core socket to epoll instance", strerror(errno)
+          )
+        );
       }
-      return;
-		};
+
+      // Preinitialize list of connection events
+      struct epoll_event conEvents[maxEventsPerLoop];
+      
+      // Start main loop
+      while (1) {
+        // Wait for any epoll event (includes core socket and connections)
+        // The -1 timeout means that it waits indefinitely until a event is reported
+        int n = epoll_wait(epoll_fd, conEvents, maxEventsPerLoop, -1);
+        if (n < 0) {
+          throw runtime_error(
+            format(
+              "Failed to run HTTP server ({}):\n{}",
+              "wait for incoming events", strerror(errno)
+            )
+          );
+        }
+        // Handle events
+        for (int i = 0; i < n; i++) {
+          // If the event is from the core socket
+          if (conEvents[n].data.fd == coreSocket.getfd()) {
+            // First check if error, if yes fail
+            // Second check pollin and accept connections
+            continue;
+          }
+          // If pollin read / parse, if header is not fully read, write to associated memory block
+          // if fully read, fully parse and initialize function
+
+          // If pollout and no function in progress, ignore, if in progress run body writer
+        }
+      }
+    };
 
 	private:
-		Socket socket;
+    // Core bsd socket
+		FileDescriptor coreSocket;
     // Socket addr
     struct sockaddr sockAddr;
     // Main socket flags
@@ -308,6 +374,8 @@ namespace SimpleHTTP {
 		const int socketBufferSize = 8192;
 		// Size of waiting incomming connections before connections are refused
 		const int socketQueueSize = 128;
+    // Defines the maximum epoll events handled in one loop iteration
+    const int maxEventsPerLoop = 12;
 	};
 
 }
