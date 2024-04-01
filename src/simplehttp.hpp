@@ -21,6 +21,7 @@
 #define SIMPLEHTTP_H
 
 #include <asm-generic/socket.h>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
@@ -35,6 +36,8 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <unordered_map>
+#include <utility>
 
 
 using namespace std;
@@ -43,104 +46,122 @@ namespace fs = filesystem;
 
 namespace SimpleHTTP {
 
-	/**
-	 * RAII compatible filedescriptor wrapper
-	 *
-   * Essentially just closes the filedescriptor on destruction
-	 */
-	class FileDescriptor {
-	public:
+  /**
+   * RAII compatible and threadsafe filedescriptor wrapper
+   *
+   * - This wrapper will close the filedescriptor automatically on destruction
+   * - All operations performed are fully thread-safe
+   */
+  class FileDescriptor {
+  public:
     // Default constructor puts descriptor into invalid state (-1)
     FileDescriptor() : fd(-1) {};
     
     FileDescriptor(int fd) : fd(fd) {};
     // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
-		FileDescriptor(FileDescriptor&& other) noexcept : fd(other.fd) {
-			if (this != &other) {
-				other.fd = -1;
-			}
-		};
-		// Copy constructor is deleted, socket cannot be copied
-		FileDescriptor(const FileDescriptor&) noexcept = delete;
+    FileDescriptor(FileDescriptor&& other) noexcept : fd(other.fd.load()) {
+      if (this != &other) {
+        other.fd = -1;
+      }
+    };
+    // Copy constructor is deleted, socket cannot be copied
+    FileDescriptor(const FileDescriptor&) noexcept = delete;
     
-    // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior		
-		FileDescriptor& operator=(FileDescriptor&& other) noexcept {
-			if (this != &other) {
-        // If other fd is not the same, close the original fd on this object
-        if (other.fd!=fd) {
-          close(fd);
+    // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior    
+    FileDescriptor& operator=(FileDescriptor&& other) noexcept {
+      if (this != &other) {
+        // Atomically set local fd to other fd and set other fd to -1
+        int oldFd = fd.exchange(other.fd.exchange(-1));
+        // If new fd is not the same as the old fd, close the old
+        if (oldFd!=fd) {
+          close(oldFd);
         }
-				fd = other.fd;
-				other.fd = -1;
-			}
+      }
       return *this;
-		};
-		// Copy assignment is deleted, socket cannot be copied
-		FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
-		
-		~FileDescriptor() {
-			close(fd);
-		};
+    };
+    // Copy assignment is deleted, socket cannot be copied
+    FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
+    
+    ~FileDescriptor() {
+      close(fd);
+    };
+
+    bool operator==(const FileDescriptor& other) {
+      return this->getfd() == other.getfd();
+    };
 
     /**
      * Returns filedescriptor
      */
-		int getfd() const noexcept {
-			return fd;
-		}
-	private:
-		int fd;
-	};
+    int getfd() const noexcept {
+      return fd;
+    }
 
-	/**
-	 * HTTP Server object bound to one bsd socket
-	 *
-	 * Server can run on top of *ipv4* or *unix sockets*
-	 *
-	 * Exceptions: runtime_error, logical_error, filesystem::filesystem_error
-	 */
-	class Server {
-	public:
-		Server() = delete;
+    /**
+     * Closes filedescriptor manually
+     */
+    void closefd() {
+      // Create tmpfd in order to prevent a race condition
+      // where the fd is closed but not set to -1.
+      int tmpFd = fd;
+      // Atomically set fd to -1
+      fd = -1;
+      // Close socket
+      close(tmpFd);
+    }
+  private:
+    atomic<int> fd;
+  };
+
+  /**
+   * HTTP Server object bound to one bsd socket
+   *
+   * Server can run on top of *ipv4* or *unix sockets*
+   *
+   * Exceptions: runtime_error, logical_error, filesystem::filesystem_error
+   */
+  class Server {
+  public:
+    Server() = delete;
 
     /**
      * Launch Server using unix socket
      */
-		Server(string unixSockPath) {
-			fs::create_directories(fs::path(unixSockPath).parent_path());
+    Server(string unixSockPath) {
+      fs::create_directories(fs::path(unixSockPath).parent_path());
       // Clean up socket, errors are ignored, if the socket cannot be cleaned up, it will fail at bind() which is fine
       unlink(unixSockPath.c_str());
 
       // Initialize core socket
       coreSocket = FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
-				throw runtime_error(
+        throw runtime_error(
           format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"create socket", strerror(errno)
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create socket", strerror(errno)
           )
-			  );
-			}
+        );
+      }
       
       // Create sockaddr_un for convenient option setting
       struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&coreSockAddr;
       // Clean unSockAddr, 'cause maybe some weird libs
-			// still expect it to zero out sin_zero (which C++ does not do by def)
+      // still expect it to zero out sin_zero (which C++ does not do by def)
       memset(unSockAddr, 0, sizeof(*unSockAddr));
       // Set unSockAddr options
       unSockAddr->sun_family = AF_UNIX;
       strcpy(unSockAddr->sun_path, unixSockPath.c_str());
 
       // Bind unix socket
-			int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
-			if (res < 0) {
-				throw runtime_error(
+      int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
+      if (res < 0) {
+        throw runtime_error(
           format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"bind socket", strerror(errno)
+            "Failed to initialize HTTP server ({}):\n{}",
+            "bind socket", strerror(errno)
           )
-			  );
-			}
+        );
+      }
 
       // Retrieve current flags
       sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
@@ -148,7 +169,7 @@ namespace SimpleHTTP {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
-						"read socket flags", strerror(errno)
+            "read socket flags", strerror(errno)
           )
         );
       }
@@ -162,103 +183,103 @@ namespace SimpleHTTP {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
-						"update socket flags", strerror(errno)
+            "update socket flags", strerror(errno)
           )
         );
       }
       
       // Socket is closed automatically in destructor, because Socket is RAII compatible.
-		};
+    };
 
-		/**
-		 * Launch Server using kernel network stack
-		 *
-		 * Multiple instances of this server can be launched in parallel to increase performance.
-		 * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
-		 */
-		Server(string ipAddr, u_int16_t port) {
+    /**
+     * Launch Server using kernel network stack
+     *
+     * Multiple instances of this server can be launched in parallel to increase performance.
+     * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
+     */
+    Server(string ipAddr, u_int16_t port) {
       // Create sockaddr_in for convenient option setting
       struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&coreSockAddr;
-			// Clean inSockAddr, 'cause maybe some weird libs
-			// still expect it to zero out sin_zero (which C++ does not do by def)
-			memset(inSockAddr, 0, sizeof(*inSockAddr));
-			// Set inSockAddr options
-			inSockAddr->sin_family = AF_INET;
-			inSockAddr->sin_port = htons(port);
+      // Clean inSockAddr, 'cause maybe some weird libs
+      // still expect it to zero out sin_zero (which C++ does not do by def)
+      memset(inSockAddr, 0, sizeof(*inSockAddr));
+      // Set inSockAddr options
+      inSockAddr->sin_family = AF_INET;
+      inSockAddr->sin_port = htons(port);
       
-			// Parse IPv4 addr and insert it to inSockAddr
-			int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr->sin_addr);
-			if (res==0) {
-				throw logic_error(
-				  format(
-						"Failed to initialize HTTP server ({}):\n{}",
-						"addr parsing", "Invalid IP-Address format"
-				  )
-			  );
-			} else if (res==-1) {
-				throw runtime_error(
-				  format(
-						"Failed to initialize HTTP server ({}):\n{}",
-						"addr parsing", strerror(errno)
-				  )
-			  );
-			}
+      // Parse IPv4 addr and insert it to inSockAddr
+      int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr->sin_addr);
+      if (res==0) {
+        throw logic_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "addr parsing", "Invalid IP-Address format"
+          )
+        );
+      } else if (res==-1) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "addr parsing", strerror(errno)
+          )
+        );
+      }
 
       // Initialize core socket
       coreSocket = FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
-				throw runtime_error(
+        throw runtime_error(
           format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"create socket", strerror(errno)
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create socket", strerror(errno)
           )
-			  );
-			}
+        );
+      }
 
-			// SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
-			// SO_REUSEPORT = Enable to cluster (lb) multiple bsd sockets with same ip + port combination
-			int opt = 1; // opt 1 indicates that the options should be enabled
-			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-			if (res < 0) {
-				throw runtime_error(
-				  format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"set socket options", strerror(errno)
-				  )
-			  );
-			}
-			
-			// Set socket recv buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &sockBufferSize, sizeof(sockBufferSize));
-			if (res < 0) {
-				throw runtime_error(
-				  format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"set socket options", strerror(errno)
-				  )
-			  );
-			}
-			// Set socket send buffer (should match a regular HTTP package for optimal performance)
-			res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &sockBufferSize, sizeof(sockBufferSize));
-			if (res < 0) {
-				throw runtime_error(
-				  format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"set socket options", strerror(errno)
-				  )
-			  );
-			}
-
-			// Bind socket to specified addr
-			res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
-			if (res < 0) {
-				throw runtime_error(
+      // SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
+      // SO_REUSEPORT = Enable to cluster (lb) multiple bsd sockets with same ip + port combination
+      int opt = 1; // opt 1 indicates that the options should be enabled
+      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+      if (res < 0) {
+        throw runtime_error(
           format(
-					  "Failed to initialize HTTP server ({}):\n{}",
-						"bind socket", strerror(errno)
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
           )
-			  );
-			}
+        );
+      }
+      
+      // Set socket recv buffer (should match a regular HTTP package for optimal performance)
+      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &sockBufferSize, sizeof(sockBufferSize));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
+          )
+        );
+      }
+      // Set socket send buffer (should match a regular HTTP package for optimal performance)
+      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &sockBufferSize, sizeof(sockBufferSize));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
+          )
+        );
+      }
+
+      // Bind socket to specified addr
+      res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "bind socket", strerror(errno)
+          )
+        );
+      }
 
       // Retrieve current flags
       sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
@@ -266,7 +287,7 @@ namespace SimpleHTTP {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
-						"read socket flags", strerror(errno)
+            "read socket flags", strerror(errno)
           )
         );
       }
@@ -280,15 +301,24 @@ namespace SimpleHTTP {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
-						"update socket flags", strerror(errno)
+            "update socket flags", strerror(errno)
           )
         );
       }
 
-			// Socket is closed automatically in destructor, because Socket is RAII compatible.
-		};
-		
-		void Serve() {
+      // Socket is closed automatically in destructor, because Socket is RAII compatible.
+    };
+
+    /**
+     * Serve launches the HTTP server
+     *
+     * tcp listener is initialized and the main event loop is started
+     *
+     * This function will run forever and block the thread, unless:
+     * - the server encounters a critical error, it will then throw a runtime_error
+     * - the socket is closed (e.g. with Kill()), it will then exit without error
+     */
+    void Serve() {
       // Start listener on core socket
       int res = listen(coreSocket.getfd(), sockQueueSize);
       if (res < 0) {
@@ -329,8 +359,25 @@ namespace SimpleHTTP {
         );
       }
 
-      // Preinitialize list of connection events
+      // Defines the base connection event
+      // This event is copied, edited and used as input for epoll_ctl syscall
+      // to register new connection events
+      // It defines the default events connections are interested in
+      struct epoll_event conBaseEvent;
+      conBaseEvent.events = EPOLLIN | EPOLLOUT;
+      
+      // Buffer with list of connection events
+      // This is used by the epoll instance to insert the events on every loop
       struct epoll_event conEvents[maxEventsPerLoop];
+
+      // Map holding connection state
+      // Key is the filedescriptor number of the socket
+      // Value is the filedescriptor object
+      // Reason is that the FileDescriptor does not implement Copy semantics, which are required for map key
+      //
+      // If the map is destructed (e.g. error is thrown),
+      // all sockets are closed automatically due to the RAII compatible fd wrapper
+      unordered_map<int, FileDescriptor> conStateMap;
       
       // Start main loop
       while (1) {
@@ -380,11 +427,27 @@ namespace SimpleHTTP {
                 return;
               }
 
-              // Accept new connection if any
+              // Prepare accept() attributes
               struct sockaddr conSockAddr = coreSockAddr;
               socklen_t conSockLen = sizeof(conSockAddr);
-              int conSocket = accept(coreSocket.getfd(), &conSockAddr, &conSockLen);
-              // Think about how to handle this
+              // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
+              // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
+              // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
+              FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
+              if (conSocket.getfd() > 0) {
+                // Copy options from base event
+                struct epoll_event conEvent = conBaseEvent;
+                // Add custom fd to identify the connection
+                conEvent.data.fd = conSocket.getfd();
+                // Add connection to list of interest on epoll instance
+                res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
+                if (res > 0) {
+                  // Move the socket to the conStateMap
+                  // Local conSocket object is explicitly marked as rvalue so that it is moved,
+                  // otherwise it would be cleaned up immediately
+                  conStateMap[conSocket.getfd()] = std::move(conSocket);
+                }
+              }
             }
             // Handle case for other connections
             
@@ -400,21 +463,37 @@ namespace SimpleHTTP {
       }
     };
 
-	private:
+    /**
+     * Kill shuts down the server
+     *
+     * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
+     *
+     * Kill() will essentially close the core socket of the server
+     * This leads to the following events:
+     * - Immediately new tcp connections to the server are rejected
+     * - Running sessions are closed on tcp level in the next event loop
+     * - The blocking Serve() will exit after next event loop
+     *
+     * Kill is thread-safe.
+     */
+    void Kill() {
+      
+    }
+
+  private:
     // Core bsd socket
-		FileDescriptor coreSocket;
+    FileDescriptor coreSocket;
     // Socket addr
     struct sockaddr coreSockAddr;
     // Socket flags
     int sockFlags;
-		// Size of the Send / Recv buffer in bytes
-		const int sockBufferSize = 8192;
-		// Size of waiting incomming connections before connections are refused
-		const int sockQueueSize = 128;
+    // Size of the Send / Recv buffer in bytes
+    const int sockBufferSize = 8192;
+    // Size of waiting incomming connections before connections are refused
+    const int sockQueueSize = 128;
     // Defines the maximum epoll events handled in one loop iteration
     const int maxEventsPerLoop = 12;
-	};
-
+  };
 }
 
 #endif
