@@ -33,7 +33,7 @@ Due to the simplicity of SimpleHTTP, there are no unit tests.
 
 #### Naming/Structural concept
 
-1. **Nameing concept**
+**Nameing concept**
 
 
 The following name concept is used:
@@ -48,13 +48,10 @@ Other types are named according to common sense
 *Exception*: Filedescriptor ("fd") may always be written in snake case (e.g. getfd()) because "Fd" looks damn ugly.
 
 
-2. **Structural concept**
+**Structural concept**
 
 
 For clarity, helper classes and types are not implemented directly on the core *Server* class, but separately inside the *internal* namespace.
-
-
-In classes *public* members are defined first, then *protected* and then *private* members.
 
 
 #### Code-Completion

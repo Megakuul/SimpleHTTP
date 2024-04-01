@@ -352,7 +352,7 @@ namespace SimpleHTTP {
       }
 
       // Add nonblocking flag
-      sockFlags = sockFlags; // | O_NONBLOCK;
+      sockFlags = sockFlags | O_NONBLOCK;
 
       // Set flags for core socket
       res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
@@ -454,15 +454,15 @@ namespace SimpleHTTP {
         // Handle events
         for (int i = 0; i < n; i++) {
           // If the event is from the core socket
-          if (conEvents[n].data.fd == coreSocket.getfd()) {
+          if (conEvents[i].data.fd == coreSocket.getfd()) {
             // Check if error occured, if yes fetch it and return
             // For simplicity reasons there is currently no http 500 response here
             // instead sockets are closed leading to hangup signal on the client
-            if (conEvents[n].events & EPOLLERR) {
+            if (conEvents[i].events & EPOLLERR) {
               int err = 0;
               socklen_t errlen = sizeof(err);
               // Read error from sockopt
-              res = getsockopt(conEvents[n].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
+              res = getsockopt(conEvents[i].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
               // If getsockopt failed, return unknown error
               if (res < 0) {
                 throw runtime_error(
@@ -480,51 +480,53 @@ namespace SimpleHTTP {
                   )
                 );
               }
-              // Check if socket hang up (happens if e.g. fd is closed)
-              // Socket hang up is expected and therefore the loop is closed without errors
-              if (conEvents[n].events & EPOLLHUP) {
-                return;
-              }
+            }
 
-              // Prepare accept() attributes
-              struct sockaddr conSockAddr = coreSockAddr;
-              socklen_t conSockLen = sizeof(conSockAddr);
-              // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
-              // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
-              // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
-              internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
-              if (conSocket.getfd() > 0) {
-                // Copy options from base event
-                struct epoll_event conEvent = conBaseEvent;
-                // Add custom fd to identify the connection
-                conEvent.data.fd = conSocket.getfd();
-                // Add connection to list of interest on epoll instance
-                res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
-                if (res > 0) {
-                  // Move the socket to the conStateMap
-                  // Local conSocket object is explicitly marked as rvalue so that it is moved,
-                  // otherwise it would be cleaned up immediately
-                  conStateMap[conSocket.getfd()] = internal::ConnectionState{
-                    .fd = std::move(conSocket),
-                    .stage = internal::Stage::PARSE
-                  };
-                }
+            // Check if socket hang up (happens if e.g. fd is closed)
+            // Socket hang up is expected and therefore the loop is closed without errors
+            if (conEvents[i].events & EPOLLHUP) {
+              return;
+            }
+
+            // Prepare accept() attributes
+            struct sockaddr conSockAddr = coreSockAddr;
+            socklen_t conSockLen = sizeof(conSockAddr);
+            // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
+            // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
+            // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
+            internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
+            if (conSocket.getfd() > 0) {
+              // Copy options from base event
+              struct epoll_event conEvent = conBaseEvent;
+              // Add custom fd to identify the connection
+              conEvent.data.fd = conSocket.getfd();
+              // Add connection to list of interest on epoll instance
+              res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
+              if (res == 0) {
+                // Move the socket to the conStateMap
+                // Local conSocket object is explicitly marked as rvalue so that it is moved,
+                // otherwise it would be cleaned up immediately
+                conStateMap[conSocket.getfd()] = internal::ConnectionState{
+                  .fd = std::move(conSocket),
+                  .stage = internal::Stage::PARSE
+                };
               }
             }
+            
             
           // If the event is from a connection
           } else {
             // Find ConnectionState object
-            auto conStateIter = conStateMap.find(conEvents[n].data.fd);
+            auto conStateIter = conStateMap.find(conEvents[i].data.fd);
             if (conStateIter == conStateMap.end()) {
               // If object is not found, try deleting it from epoll as it is
               // from simplehttp considered as "unmanaged".
-              epoll_ctl(epollSocket.getfd(), EPOLL_CTL_DEL, conEvents[n].data.fd, nullptr);
+              epoll_ctl(epollSocket.getfd(), EPOLL_CTL_DEL, conEvents[i].data.fd, nullptr);
               continue;
             }
 
             // Check if underlying connection failed or hangup
-            if (conEvents[n].events & EPOLLERR || conEvents[n].events & EPOLLHUP) {
+            if (conEvents[i].events & EPOLLERR || conEvents[i].events & EPOLLHUP) {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
               // At the moment I do not see sufficient reason to handle error further
               conStateMap.erase(conStateIter);
@@ -567,6 +569,21 @@ namespace SimpleHTTP {
     
   private:
     void ParseHeader(internal::ConnectionState &state) {
+      // We take the socket buffersize to read everything at once (if available)
+      char buffer[sockBufferSize+1];
+      int n = recv(state.fd.getfd(), buffer, sockBufferSize, 0);
+      if (n < 0) {
+        // TODO: Skip on EAGAIN / EWOULDBLOCK
+        // Exit con on ECONNREFUSED or EBADF (and possible all others)
+        printf("Error %s\n", strerror(errno)); // Just debug
+        return;
+      }
+      // Append string end
+      buffer[n] = '\0';
+
+      // TODO: Combine buffer with a buffer on state and write the new full buffer to state
+      printf("%s\n", buffer);
+      
       
       // Read until \r\n\r\n (where the body starts) then parse header and initialize next stage
     }
