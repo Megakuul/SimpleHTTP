@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <filesystem>
@@ -46,72 +47,116 @@ namespace fs = filesystem;
 
 namespace SimpleHTTP {
 
-  /**
-   * RAII compatible and threadsafe filedescriptor wrapper
-   *
-   * - This wrapper will close the filedescriptor automatically on destruction
-   * - All operations performed are fully thread-safe
-   */
-  class FileDescriptor {
-  public:
-    // Default constructor puts descriptor into invalid state (-1)
-    FileDescriptor() : fd(-1) {};
+  // Namespace declared for internal helper / supporter functions & classes
+  namespace internal {
+
+    /**
+     * RAII compatible and threadsafe filedescriptor wrapper
+     *
+     * - This wrapper will close the filedescriptor automatically on destruction
+     * - All operations performed are fully thread-safe
+     */
+    class FileDescriptor {
+    public:
+      // Default constructor puts descriptor into invalid state (-1)
+      FileDescriptor() : fd(-1) {};
     
-    FileDescriptor(int fd) : fd(fd) {};
-    // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
-    FileDescriptor(FileDescriptor&& other) noexcept : fd(other.fd.load()) {
-      if (this != &other) {
-        other.fd = -1;
-      }
-    };
-    // Copy constructor is deleted, socket cannot be copied
-    FileDescriptor(const FileDescriptor&) noexcept = delete;
+      FileDescriptor(int fd) : fd(fd) {};
+      // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
+      FileDescriptor(FileDescriptor&& other) {
+        // Lock other descriptor lock
+        lock_guard<mutex> otherLock(other.fd_mut);
+        fd = other.fd.exchange(-1);
+      };
+      // Copy constructor is deleted, socket cannot be copied
+      FileDescriptor(const FileDescriptor&) noexcept = delete;
     
-    // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior    
-    FileDescriptor& operator=(FileDescriptor&& other) noexcept {
-      if (this != &other) {
-        // Atomically set local fd to other fd and set other fd to -1
-        int oldFd = fd.exchange(other.fd.exchange(-1));
-        // If new fd is not the same as the old fd, close the old
-        if (oldFd!=fd) {
-          close(oldFd);
+      // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior    
+      FileDescriptor& operator=(FileDescriptor&& other) {
+        if (this != &other) {
+          // Lock both descriptor locks
+          lock_guard<mutex> localLock(fd_mut);
+          lock_guard<mutex> otherLock(other.fd_mut);
+          // Atomically set local fd to other fd and set other fd to -1
+          int newfd = other.fd.exchange(-1);
+          int oldfd = fd.exchange(newfd);
+          // If new fd is not the same as the old fd, close the old
+          if (oldfd!=newfd) {
+            close(oldfd);
+          }
         }
-      }
-      return *this;
-    };
-    // Copy assignment is deleted, socket cannot be copied
-    FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
+        return *this;
+      };
+      // Copy assignment is deleted, socket cannot be copied
+      FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
     
-    ~FileDescriptor() {
-      close(fd);
+      ~FileDescriptor() {
+        // Lock to prevent race condition on writes
+        lock_guard<mutex> lock(fd_mut);
+        // Close socket
+        close(fd);
+      };
+
+      bool operator==(const FileDescriptor& other) {
+        return this->getfd() == other.getfd();
+      };
+
+      /**
+       * Returns filedescriptor
+       */
+      int getfd() const noexcept {
+        return fd;
+      }
+
+      /**
+       * Closes filedescriptor manually
+       */
+      void closefd() {
+        // Lock to prevent race condition on writes
+        lock_guard<mutex> lock(fd_mut);
+        // Close socket
+        close(fd);
+        // Invalidate descriptor
+        fd = -1;
+      }
+    private:
+      // Filedescriptor number
+      // Atomic value is used in order to omit a full mutex lock on every read operation
+      atomic<int> fd;
+      // Mutex lock
+      // Lock is used for write operations at the filedescriptor number
+      // The implementation of this lock may seem a bit overcomplex for the current use case
+      // but if more writer functions are implemented in the future, it will be crucial.
+      mutex fd_mut;
     };
 
-    bool operator==(const FileDescriptor& other) {
-      return this->getfd() == other.getfd();
+
+
+    /**
+     * Stage defines various stages for a http connection
+     */
+    enum Stage {
+      PARSE, // Header is currently fetched / parsed
+      FUNC, // User defined function is currently executed
+      RESP // Response is currently sent
     };
 
-    /**
-     * Returns filedescriptor
-     */
-    int getfd() const noexcept {
-      return fd;
-    }
 
+    
     /**
-     * Closes filedescriptor manually
+     * ConnectionState holds the state of a http connection
      */
-    void closefd() {
-      // Create tmpfd in order to prevent a race condition
-      // where the fd is closed but not set to -1.
-      int tmpFd = fd;
-      // Atomically set fd to -1
-      fd = -1;
-      // Close socket
-      close(tmpFd);
-    }
-  private:
-    atomic<int> fd;
-  };
+    struct ConnectionState {
+      FileDescriptor fd;
+      Stage stage;
+    };
+  }
+
+
+
+
+
+  
 
   /**
    * HTTP Server object bound to one bsd socket
@@ -121,6 +166,20 @@ namespace SimpleHTTP {
    * Exceptions: runtime_error, logical_error, filesystem::filesystem_error
    */
   class Server {
+  private:
+    // Core bsd socket
+    internal::FileDescriptor coreSocket;
+    // Socket addr
+    struct sockaddr coreSockAddr;
+    // Socket flags
+    int sockFlags;
+    // Size of the Send / Recv buffer in bytes
+    const int sockBufferSize = 8192;
+    // Size of waiting incomming connections before connections are refused
+    const int sockQueueSize = 128;
+    // Defines the maximum epoll events handled in one loop iteration
+    const int maxEventsPerLoop = 12;
+    
   public:
     Server() = delete;
 
@@ -133,7 +192,7 @@ namespace SimpleHTTP {
       unlink(unixSockPath.c_str());
 
       // Initialize core socket
-      coreSocket = FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
+      coreSocket = internal::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -226,7 +285,7 @@ namespace SimpleHTTP {
       }
 
       // Initialize core socket
-      coreSocket = FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
+      coreSocket = internal::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -331,7 +390,7 @@ namespace SimpleHTTP {
       }
 
       // Create epoll instance
-      FileDescriptor epollSocket(epoll_create1(0));
+      internal::FileDescriptor epollSocket(epoll_create1(0));
       if (epollSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -372,12 +431,12 @@ namespace SimpleHTTP {
 
       // Map holding connection state
       // Key is the filedescriptor number of the socket
-      // Value is the filedescriptor object
-      // Reason is that the FileDescriptor does not implement Copy semantics, which are required for map key
+      // Value is a ConnectionState object which contains information about the connection
+      // including a FileDescriptor resource
       //
       // If the map is destructed (e.g. error is thrown),
-      // all sockets are closed automatically due to the RAII compatible fd wrapper
-      unordered_map<int, FileDescriptor> conStateMap;
+      // all sockets are closed automatically due to the RAII compatible FileDescriptor in the ConnectionState
+      unordered_map<int, internal::ConnectionState> conStateMap;
       
       // Start main loop
       while (1) {
@@ -433,7 +492,7 @@ namespace SimpleHTTP {
               // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
               // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
               // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
-              FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
+              internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
               if (conSocket.getfd() > 0) {
                 // Copy options from base event
                 struct epoll_event conEvent = conBaseEvent;
@@ -445,23 +504,49 @@ namespace SimpleHTTP {
                   // Move the socket to the conStateMap
                   // Local conSocket object is explicitly marked as rvalue so that it is moved,
                   // otherwise it would be cleaned up immediately
-                  conStateMap[conSocket.getfd()] = std::move(conSocket);
+                  conStateMap[conSocket.getfd()] = internal::ConnectionState{
+                    .fd = std::move(conSocket),
+                    .stage = internal::Stage::PARSE
+                  };
                 }
               }
             }
-            // Handle case for other connections
             
-            // First check if error, if yes fail
-            // Second check pollin and accept connections
-            continue;
-          }
-          // If pollin read / parse, if header is not fully read, write to associated memory block
-          // if fully read, fully parse and initialize function
+          // If the event is from a connection
+          } else {
+            // Find ConnectionState object
+            auto conStateIter = conStateMap.find(conEvents[n].data.fd);
+            if (conStateIter == conStateMap.end()) {
+              // If object is not found, try deleting it from epoll as it is
+              // from simplehttp considered as "unmanaged".
+              epoll_ctl(epollSocket.getfd(), EPOLL_CTL_DEL, conEvents[n].data.fd, nullptr);
+              continue;
+            }
 
-          // If pollout and no function in progress, ignore, if in progress run body writer
+            // Check if underlying connection failed or hangup
+            if (conEvents[n].events & EPOLLERR || conEvents[n].events & EPOLLHUP) {
+              // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
+              // At the moment I do not see sufficient reason to handle error further
+              conStateMap.erase(conStateIter);
+              continue;
+            }
+
+            // Handle current stage
+            switch (conStateIter->second.stage) {
+            case internal::Stage::PARSE:
+              ParseHeader(conStateIter->second);
+              break;
+            case internal::Stage::FUNC:
+              break;
+            case internal::Stage::RESP:
+              break;
+            }
+          }
         }
       }
     };
+
+
 
     /**
      * Kill shuts down the server
@@ -477,22 +562,14 @@ namespace SimpleHTTP {
      * Kill is thread-safe.
      */
     void Kill() {
-      
+      coreSocket.closefd();
     }
-
+    
   private:
-    // Core bsd socket
-    FileDescriptor coreSocket;
-    // Socket addr
-    struct sockaddr coreSockAddr;
-    // Socket flags
-    int sockFlags;
-    // Size of the Send / Recv buffer in bytes
-    const int sockBufferSize = 8192;
-    // Size of waiting incomming connections before connections are refused
-    const int sockQueueSize = 128;
-    // Defines the maximum epoll events handled in one loop iteration
-    const int maxEventsPerLoop = 12;
+    void ParseHeader(internal::ConnectionState &state) {
+      
+      // Read until \r\n\r\n (where the body starts) then parse header and initialize next stage
+    }
   };
 }
 

@@ -2,7 +2,7 @@
 
 ![SimpleHTTP Icon](/simplehttp.svg "SimpleHTTP")
 
-Extremly simple and fast C++ HTTP library.
+Extremly simple and basic library to launch a http server.
 
 
 ### Development
@@ -29,6 +29,32 @@ In the `test` directory you will find simple end-to-end tests which are used for
 
 
 Due to the simplicity of SimpleHTTP, there are no unit tests.
+
+
+#### Naming/Structural concept
+
+1. **Nameing concept**
+
+
+The following name concept is used:
+
+- Variables = camelCase
+- Functions = PascalCase
+- Classes   = PascalCase
+
+Other types are named according to common sense
+
+
+*Exception*: Filedescriptor ("fd") may always be written in snake case (e.g. getfd()) because "Fd" looks damn ugly.
+
+
+2. **Structural concept**
+
+
+For clarity, helper classes and types are not implemented directly on the core *Server* class, but separately inside the *internal* namespace.
+
+
+In classes *public* members are defined first, then *protected* and then *private* members.
 
 
 #### Code-Completion
