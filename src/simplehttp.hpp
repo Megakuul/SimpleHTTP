@@ -506,7 +506,8 @@ namespace SimpleHTTP {
                 // Move the socket to the conStateMap
                 // Local conSocket object is explicitly marked as rvalue so that it is moved,
                 // otherwise it would be cleaned up immediately
-                conStateMap[conSocket.getfd()] = internal::ConnectionState{
+                int conSockfd = conSocket.getfd(); // Copied because conSocket is moved before map[] overloader
+                conStateMap[conSockfd] = internal::ConnectionState{
                   .fd = std::move(conSocket),
                   .stage = internal::Stage::PARSE
                 };
