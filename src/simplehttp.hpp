@@ -47,6 +47,54 @@ namespace fs = filesystem;
 
 namespace SimpleHTTP {
 
+  /**
+   * Http Request object retrieved upon successful connection
+   *
+   * This object contains http header information and functions to work with the http body
+   */
+  class Request {
+  public:
+
+
+  private:
+    // HTTP Type (e.g. Get, Post, etc.)
+    string type;
+    // HTTP Path (e.g. /api/some)
+    string path;
+    // HTTP Version (e.g. HTTP/1.1)
+    string version;
+    // HTTP Host (e.g. localhost:8080)
+    string host;
+    // HTTP Connection flag (keep-alive -> true; close -> false)
+    bool keepalive;
+  };
+
+  /**
+   * Http Response object used to answer the http request
+   *
+   * This object contains http header information
+   */
+  class Response {
+  public:
+
+
+  private:
+    // HTTP Version (e.g. HTTP/1.1)
+    string version;
+    // HTTP Status code (e.g. 200)
+    uint statusCode;
+    // HTTP Status reason (e.g. OK)
+    string statusReason;
+    // HTTP Date
+    string date;
+    // HTTP Server (TODO: Read from bazel or something)
+    const string server = "SimpleHTTP/1.0.0 (Linux)";
+    // HTTP ETag
+    string etag;
+    // HTTP Cache-Control
+    const string cachecontrol = "no-cache";
+  };
+
   // Namespace declared for internal helper / supporter functions & classes
   namespace internal {
 
@@ -131,14 +179,13 @@ namespace SimpleHTTP {
     };
 
 
-
     /**
      * Stage defines various stages for a http connection
      */
     enum Stage {
-      PARSE, // Header is currently fetched / parsed
-      FUNC, // User defined function is currently executed
-      RESP // Response is currently sent
+      PARSE = 1, // Header is currently fetched / parsed
+      FUNC = 2, // User defined function is currently executed
+      RESP = 3 // Response is currently sent
     };
 
 
@@ -149,12 +196,9 @@ namespace SimpleHTTP {
     struct ConnectionState {
       FileDescriptor fd;
       Stage stage;
+      string buffer;
     };
   }
-
-
-
-
 
   
 
