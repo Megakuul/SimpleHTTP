@@ -3,6 +3,7 @@
 ![SimpleHTTP Icon](/simplehttp.svg "SimpleHTTP")
 
 Extremly simple and basic library to launch a http server.
+ 
 
 
 ### Development
@@ -13,6 +14,11 @@ If you work on a PR which takes more then 2 commits, create a feature branch and
 
 
 All library relevant code is located in the single header file `/src/simplehttp.h`.
+
+
+#### Concept
+
+![simplehttp flowchart](/flowchart.png)
 
 
 #### Examples

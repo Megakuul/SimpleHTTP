@@ -23,8 +23,13 @@
 #include <asm-generic/socket.h>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <ctime>
+#include <exception>
 #include <mutex>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <filesystem>
@@ -55,7 +60,42 @@ namespace SimpleHTTP {
   class Request {
   public:
 
+    string getType() const noexcept {
+      return type;
+    }
 
+    Request& setType(string newtype) {
+      type = newtype;
+      return *this;
+    }
+    
+    string getPath() const noexcept {
+      return path;
+    }
+
+    Request& setPath(string newpath) {
+      path = newpath;
+      return *this;
+    }
+
+    string getVersion() const noexcept {
+      return version;
+    }
+
+    Request& setVersion(string newversion) {
+      version = newversion;
+      return *this;
+    }
+
+    string getHeader(string key) {
+      return headers[key];
+    }
+
+    Request& setHeader(string key, string value) {
+      headers[key] = value;
+      return *this;
+    }
+    
   private:
     // HTTP Type (e.g. Get, Post, etc.)
     string type;
@@ -63,10 +103,9 @@ namespace SimpleHTTP {
     string path;
     // HTTP Version (e.g. HTTP/1.1)
     string version;
-    // HTTP Host (e.g. localhost:8080)
-    string host;
-    // HTTP Connection flag (keep-alive -> true; close -> false)
-    bool keepalive;
+
+    // HTTP headers
+    unordered_map<string, string> headers;
   };
 
   /**
@@ -76,23 +115,118 @@ namespace SimpleHTTP {
    */
   class Response {
   public:
+    string getVersion() const noexcept {
+      return version;
+    }
+    
+    uint getStatusCode() const noexcept {
+      return statusCode;
+    }
+    
+    Response& setStatusCode(uint newstatuscode) {
+      statusCode = newstatuscode;
+      return *this;
+    }
 
+    string getStatusReason() const noexcept {
+      return statusReason;
+    }
 
+    Response& setStatusReason(string newstatusreason) {
+      statusReason = newstatusreason;
+      return *this;
+    }
+
+    optional<string> getContentType() {
+      auto it = headers.find("Content-Type");
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    Response& setContentType(string newcontenttype) {
+      headers["Content-Type"] = newcontenttype;
+      return *this;
+    }
+
+    optional<chrono::system_clock::time_point> getDate() {
+      auto it = headers.find("Date");
+      if (it == headers.end()) {
+        return nullopt;
+      }
+
+      // Create input stream to parse the time
+      istringstream iss(it->second);
+      tm date_tm = {};
+      // Parse from IMF_fixdate
+      iss >> get_time(&date_tm, "%a, %d %b %Y %H:%M:%S");
+
+      if (iss.fail()) {
+        // If it fails return nullopt
+        return nullopt;
+      } else {
+        // If succeeded, convert to time_t and the time_t to a time_point
+        return chrono::system_clock::from_time_t(mktime(&date_tm));
+      }
+    }
+
+    Response& setDate(chrono::system_clock::time_point newdate) {
+      // Convert to time_t
+      time_t newdate_t = chrono::system_clock::to_time_t(newdate);
+      // Convert to GMT
+      tm newdate_tm = *gmtime(&newdate_t);
+
+      ostringstream oss;
+      // Parse to the IMF_fixdate format
+      oss << put_time(&newdate_tm, "%a, %d %b %Y %H:%M:%S GMT");
+      headers["Date"] = oss.str();
+      return *this;
+    }
+
+    unordered_map<string, string>& getHeaders() {
+      return headers;
+    }
+
+    optional<string> getHeader(string key) {
+      auto it = headers.find(key);
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    Response& setHeader(string key, string newvalue) {
+      headers[key] = newvalue;
+      return *this;
+    }
+
+    string getBody() {
+      return body;
+    }
+
+    Response& setBody(string newbody) {
+      body = newbody;
+      headers["Content-Length"] = to_string(body.length());
+      return *this;
+    }
+
+    Response& appendBody(string appendbody) {
+      body += appendbody;
+      headers["Content-Length"] = to_string(body.length());
+      return *this;
+    }
   private:
-    // HTTP Version (e.g. HTTP/1.1)
-    string version;
-    // HTTP Status code (e.g. 200)
-    uint statusCode;
-    // HTTP Status reason (e.g. OK)
-    string statusReason;
-    // HTTP Date
-    string date;
-    // HTTP Server (TODO: Read from bazel or something)
-    const string server = "SimpleHTTP/1.0.0 (Linux)";
-    // HTTP ETag
-    string etag;
-    // HTTP Cache-Control
-    const string cachecontrol = "no-cache";
+    // HTTP Version, constant as simpleHTTP only supports HTTP/1.1
+    string version = "HTTP/1.1";
+    // HTTP Status code, default is 200
+    uint statusCode = 200;
+    // HTTP Status reason, default is OK
+    string statusReason = "OK";
+    // HTTP headers
+    unordered_map<string, string> headers;
+    // Body represented as string
+    string body = "";
   };
 
   // Namespace declared for internal helper / supporter functions & classes
@@ -183,12 +317,132 @@ namespace SimpleHTTP {
      * Stage defines various stages for a http connection
      */
     enum Stage {
-      PARSE = 1, // Header is currently fetched / parsed
+      REQ = 1, // Request is currently received
       FUNC = 2, // User defined function is currently executed
-      RESP = 3 // Response is currently sent
+      RES = 3 // Response is currently sent
     };
 
 
+    /**
+     * String wrapper which provides utils for serialization / deserialization
+     */
+    class Buffer {
+    public:
+      Buffer& operator=(const string& other) {
+        buffer = other;
+        cursor = 0;
+        return *this;
+      }
+      
+      Buffer& operator=(const char* other) {
+        buffer = other;
+        cursor = 0;
+        return *this;
+      }
+      
+      Buffer& operator+=(const string& other) {
+        buffer += other;
+        return *this;
+      }
+
+      Buffer& operator+=(const char* other) {
+        buffer += other;
+        return *this;
+      }
+
+      /**
+       * Get char at cursor position
+       */
+      char current() {
+        return buffer[cursor];
+      }
+      
+      /**
+       * Increment cursor and get char at new position
+       *
+       * If cursor is out of bound (no more data is on the buffer) nullopt is returned
+       * Cursor is not incremented if the next cursor would be out of bound
+       */
+      optional<char> next() {
+        int nextCursor = cursor+1;
+        if (nextCursor<buffer.size())
+          return buffer[cursor=nextCursor];
+        else
+          return nullopt;
+      }
+
+      /**
+       * Set cursor to 0
+      */
+      Buffer& resetCursor() {
+        cursor = 0;
+        return *this;
+      }
+
+      /**
+       * Set cursor to position. If pos is out of range, false is returned
+       * and the cursor is not changed
+       */
+      bool setCursor(int newpos) {
+        if (newpos<buffer.size() && newpos>=0) {
+          cursor = newpos;
+          return true;
+        } else
+          return false;
+      }
+
+      /**
+       * Increment cursor by the specified amount. If the cursor is out of range, false is returned
+       * and the cursor is not changed
+       */
+      bool incCursor(int update) {
+        int nextCursor = cursor+update;
+        if (nextCursor<buffer.size() && nextCursor>=0) {
+          cursor = nextCursor;
+          return true;
+        } else
+          return false;
+      }
+      
+      /**
+       * Returns wheter the buffer from index 0 is empty
+       */
+      bool empty() {
+        return buffer.empty();
+      }
+      
+      /**
+       * Get reference to underlying cstring from index 0
+       */
+      const char* cstr() {
+        return buffer.c_str();
+      }
+
+      /**
+       * Returns the size of the buffer from index 0
+       */
+      int size() {
+        return buffer.size();
+      }
+
+      /**
+       * Get reference to underlying cstring from the cursor
+       */
+      const char* cstrAfterCursor() {
+        return &buffer[cursor];
+      }
+
+      /**
+       * Returns the size of the buffer from the cursor
+       */
+      int sizeAfterCursor() {
+        return buffer.size() - cursor;
+      }
+
+    private:
+      string buffer;
+      int cursor = 0;
+    };
     
     /**
      * ConnectionState holds the state of a http connection
@@ -196,7 +450,14 @@ namespace SimpleHTTP {
     struct ConnectionState {
       FileDescriptor fd;
       Stage stage;
-      string buffer;
+      // Request buffer
+      Buffer reqBuffer;
+      // Response buffer
+      Buffer resBuffer;
+      // Request object
+      Request request;
+      // Response object
+      Response response;
     };
   }
 
@@ -553,7 +814,7 @@ namespace SimpleHTTP {
                 int conSockfd = conSocket.getfd(); // Copied because conSocket is moved before map[] overloader
                 conStateMap[conSockfd] = internal::ConnectionState{
                   .fd = std::move(conSocket),
-                  .stage = internal::Stage::PARSE
+                  .stage = internal::Stage::REQ
                 };
               }
             }
@@ -580,12 +841,28 @@ namespace SimpleHTTP {
 
             // Handle current stage
             switch (conStateIter->second.stage) {
-            case internal::Stage::PARSE:
-              ParseHeader(conStateIter->second);
+            case internal::Stage::REQ:
+              // Only process if EPOLLIN event is reported
+              if (conEvents[i].events & EPOLLIN) {
+                // Continue processing request
+                if (!ProcessRequest(conStateIter->second)) {
+                  // If encountered critical error, just close connection (erase from map)
+                  conStateMap.erase(conStateIter);
+                }
+              }
               break;
             case internal::Stage::FUNC:
               break;
-            case internal::Stage::RESP:
+            case internal::Stage::RES:
+              // Only process if EPOLLOUT event is reported
+              if (conEvents[i].events & EPOLLIN) {
+                // Continue sending response
+                if (!ProcessResponse(conStateIter->second)) {
+                  // If encountered critical error or explicit close request (Connection: close)
+                  // close connection (erase from map)
+                  conStateMap.erase(conStateIter);
+                }
+              }
               break;
             }
           }
@@ -613,24 +890,154 @@ namespace SimpleHTTP {
     }
     
   private:
-    void ParseHeader(internal::ConnectionState &state) {
-      // We take the socket buffersize to read everything at once (if available)
-      char buffer[sockBufferSize+1];
-      int n = recv(state.fd.getfd(), buffer, sockBufferSize, 0);
-      if (n < 0) {
-        // TODO: Skip on EAGAIN / EWOULDBLOCK
-        // Exit con on ECONNREFUSED or EBADF (and possible all others)
-        printf("Error %s\n", strerror(errno)); // Just debug
-        return;
-      }
-      // Append string end
-      buffer[n] = '\0';
+    bool ProcessRequest(internal::ConnectionState &state) {
+      while (1) {
+        // We take the socket buffersize to read everything at once (if available)
+        char buffer[sockBufferSize+1];
+        int n = recv(state.fd.getfd(), buffer, sockBufferSize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Skip if no data is available to read
+            return true;
+          } else {
+            // Exit and close connection on error
+            return false;
+          }
+        }
+        // Append string end
+        buffer[n] = '\0';
+        // Append buffer str to state buffer
+        state.reqBuffer += buffer;
 
-      // TODO: Combine buffer with a buffer on state and write the new full buffer to state
-      printf("%s\n", buffer);
+        // Parse current buffer
+        try {
+          DeserializeRequest(state.reqBuffer, state.request);
+        } catch (exception &e) {
+          state.response
+            .setStatusCode(400)
+            .setStatusReason("Bad Request")
+            .setContentType("text/plain")
+            .setBody(e.what());
+          state.stage = internal::RES;
+          return true;
+        }
+      }
+    }
+
+    /**
+     * Deserializes buffer into request
+     *
+     * This function works no matter where the buffer cursor is,
+     * it parses based on the content of the request members.
+     * The function will parse the full buffer into the request.
+     * 
+     * Parsing errors will lead to an exception
+     */
+    void DeserializeRequest(internal::Buffer &buffer, Request &request) {
+      string identifier = "";
+      optional<char> c;
+
+      // If type is empty, parse it
+      if (request.getType().empty()) {
+        while (1) {
+          if (!(c = buffer.next()).has_value()) {
+            return;
+          }
+          if (c.value()==' ') {
+            request.setType(identifier);
+            break;
+          }
+          identifier += c.value();
+        }
+      }
+      // If path is empty, parse it
+      if (request.getPath().empty()) {
+
+      }
+      // If version is empty, parse it
+      if (request.getVersion().empty()) {
+
+      }
+
+
       
-      
-      // Read until \r\n\r\n (where the body starts) then parse header and initialize next stage
+    }
+
+    bool ProcessResponse(internal::ConnectionState &state) {
+      if (state.resBuffer.empty()) {
+        // Set date header to now
+        state.response.setDate(chrono::system_clock::now());
+        // Serialize response
+        SerializeResponse(state.response, state.resBuffer);
+      }
+      while(1) {
+        int n = send(
+          state.fd.getfd(),
+          state.resBuffer.cstrAfterCursor(),
+          state.resBuffer.sizeAfterCursor(), 0
+        );
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Skip if no data is available to read
+            return true;
+          } else {
+            // Exit and close connection on error
+            return false;
+          }
+        }
+        // Increment res buffer by the read bytes
+        state.resBuffer.incCursor(n);
+        // Check if all data is sent, if yes the operation is finished
+        if (state.resBuffer.sizeAfterCursor() < 1) {
+          // If connection header is set to "close". Explicitly close the connection
+          if (state.request.getHeader("Connection")=="close") {
+            return false;
+          }
+          // Reset connection state by creating a new object and moving the fd
+          state = internal::ConnectionState{
+            .fd = std::move(state.fd),
+            .stage = internal::Stage::REQ
+          };
+          return true;
+        }
+      }
+    }
+
+    /**
+     * Serializes response into buffer
+     *
+     * Unlike the deserialization function, this will serialize the full response into the buffer
+     * at once.
+     */
+    void SerializeResponse(Response &response, internal::Buffer &buffer) {
+      // Initialize buffer with status line 
+      buffer =
+        format(
+          "{} {} {}\r\n",
+          response.getVersion(),
+          response.getStatusCode(),
+          response.getStatusReason()
+        );
+
+      // Iterate over all headers and append them
+      for (auto &header : response.getHeaders()) {
+        // Skip empty headers
+        if (header.second.empty()) {
+          continue;
+        }
+        // Append header to the buffer
+        buffer += format(
+          "{}: {}\r\n",
+          header.first,
+          header.second
+        );
+      }
+
+      // Append body to the buffer
+      buffer += format(
+        "\r\n{}",
+        response.getBody()
+      );
     }
   };
 }
