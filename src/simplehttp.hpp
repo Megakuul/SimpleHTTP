@@ -324,81 +324,117 @@ namespace SimpleHTTP {
 
 
     /**
-     * String wrapper which provides utils for serialization / deserialization
+     * String wrapper providing head and rollback cursor for efficient parsing
      */
     class Buffer {
     public:
+      /**
+       * Assignes new string to buffer and resets cursors
+       */
       Buffer& operator=(const string& other) {
         buffer = other;
-        cursor = 0;
+        headCursor = 0;
+        rollbackCursor = 0;
         return *this;
       }
-      
+
+      /**
+       * Assignes new cstring to buffer and resets cursors
+       */
       Buffer& operator=(const char* other) {
         buffer = other;
-        cursor = 0;
+        headCursor = 0;
+        rollbackCursor = 0;
         return *this;
       }
-      
+
+      /**
+       * Increments string
+       *
+       * This will not modify the cursors
+       */
       Buffer& operator+=(const string& other) {
         buffer += other;
         return *this;
       }
 
+      /**
+       * Increments string
+       *
+       * This will not modify the cursors
+       */
       Buffer& operator+=(const char* other) {
         buffer += other;
         return *this;
       }
 
       /**
-       * Get char at cursor position
+       * Get char at head cursor position
        */
       char current() {
-        return buffer[cursor];
+        return buffer[headCursor];
       }
       
       /**
-       * Increment cursor and get char at new position
+       * Increment head cursor and get char at new position
        *
        * If cursor is out of bound (no more data is on the buffer) nullopt is returned
        * Cursor is not incremented if the next cursor would be out of bound
        */
       optional<char> next() {
-        int nextCursor = cursor+1;
+        int nextCursor = headCursor+1;
         if (nextCursor<buffer.size())
-          return buffer[cursor=nextCursor];
+          return buffer[headCursor=nextCursor];
         else
           return nullopt;
       }
 
       /**
-       * Set cursor to 0
-      */
-      Buffer& resetCursor() {
-        cursor = 0;
+       * Rollback head cursor to latest commit (or 0 if there was no commit)
+       */
+      Buffer& rollback() {
+        headCursor = rollbackCursor;
         return *this;
       }
 
       /**
-       * Set cursor to position. If pos is out of range, false is returned
+       * Create commit point
+       *
+       * Sets rollback cursor to head cursor
+       */
+      Buffer& commit() {
+        rollbackCursor = headCursor;
+        return *this;
+      }
+
+      /**
+       * Set head cursor to 0
+      */
+      Buffer& reset() {
+        headCursor = 0;
+        return *this;
+      }
+
+      /**
+       * Set head cursor to position. If pos is out of range, false is returned
        * and the cursor is not changed
        */
-      bool setCursor(int newpos) {
+      bool set(int newpos) {
         if (newpos<buffer.size() && newpos>=0) {
-          cursor = newpos;
+          headCursor = newpos;
           return true;
         } else
           return false;
       }
 
       /**
-       * Increment cursor by the specified amount. If the cursor is out of range, false is returned
+       * Increment head cursor by the specified amount. If the cursor is out of range, false is returned
        * and the cursor is not changed
        */
-      bool incCursor(int update) {
-        int nextCursor = cursor+update;
+      bool increment(int update) {
+        int nextCursor = headCursor+update;
         if (nextCursor<buffer.size() && nextCursor>=0) {
-          cursor = nextCursor;
+          headCursor = nextCursor;
           return true;
         } else
           return false;
@@ -426,22 +462,30 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Get reference to underlying cstring from the cursor
+       * Get reference to underlying cstring from the head cursor
        */
       const char* cstrAfterCursor() {
-        return &buffer[cursor];
+        return &buffer[headCursor];
       }
 
       /**
-       * Returns the size of the buffer from the cursor
+       * Returns the size of the buffer from the head cursor
        */
       int sizeAfterCursor() {
-        return buffer.size() - cursor;
+        return buffer.size() - headCursor;
+      }
+
+      /**
+       * Returns the size of the buffer from 0 to head cursor
+       */
+      int sizeBeforeCursor() {
+        return headCursor;
       }
 
     private:
       string buffer;
-      int cursor = 0;
+      int headCursor = 0;
+      int rollbackCursor = 0;
     };
     
     /**
@@ -484,6 +528,8 @@ namespace SimpleHTTP {
     const int sockQueueSize = 128;
     // Defines the maximum epoll events handled in one loop iteration
     const int maxEventsPerLoop = 12;
+    // Defines the maximum size of the header. If exceeded request will fail
+    const int maxHeaderSize = 8192;
     
   public:
     Server() = delete;
@@ -890,6 +936,11 @@ namespace SimpleHTTP {
     }
     
   private:
+    /**
+     * Process request based on connection state
+     *
+     * Returns false if the connection should be closed
+     */
     bool ProcessRequest(internal::ConnectionState &state) {
       while (1) {
         // We take the socket buffersize to read everything at once (if available)
@@ -912,6 +963,12 @@ namespace SimpleHTTP {
         // Parse current buffer
         try {
           DeserializeRequest(state.reqBuffer, state.request);
+          // Check if serialized part before cursor exceeds maxHeaderSize.
+          // This check, performed post-serialization, ensures body parts in the buffer
+          // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
+          if (state.reqBuffer.sizeBeforeCursor()>maxHeaderSize) {
+            throw runtime_error("Header size exceeds defined maximum size");
+          }
         } catch (exception &e) {
           state.response
             .setStatusCode(400)
@@ -941,10 +998,16 @@ namespace SimpleHTTP {
       if (request.getType().empty()) {
         while (1) {
           if (!(c = buffer.next()).has_value()) {
+            // Rollback buffer as not enough data is provided to parse the type
+            buffer.rollback();
             return;
           }
+          // Read until space
           if (c.value()==' ') {
+            // Set type and exit loop
             request.setType(identifier);
+            // Commit buffer as the identifier was fully parsed
+            buffer.commit();
             break;
           }
           identifier += c.value();
@@ -952,17 +1015,125 @@ namespace SimpleHTTP {
       }
       // If path is empty, parse it
       if (request.getPath().empty()) {
-
+        identifier = "";
+        while (1) {
+          if (!(c = buffer.next()).has_value()) {
+            // Rollback buffer as not enough data is provided to parse the path
+            buffer.rollback();
+            return;
+          }
+          // Read until space
+          if (c.value()==' ') {
+            // Set header and exit loop
+            request.setPath(identifier);
+            // Commit buffer as the identifier was fully parsed
+            buffer.commit();
+            break;
+          }
+          identifier += c.value();
+        }
       }
       // If version is empty, parse it
       if (request.getVersion().empty()) {
-
+        identifier = "";
+        while (1) {
+          if (!(c = buffer.next()).has_value()) {
+            // Rollback buffer as not enough data is provided to parse the version
+            buffer.rollback();
+            return;
+          }
+          // Skip carriage return as termination is based on newline
+          if (c.value()=='\r') continue;
+          // Read until newline
+          if (c.value()=='\n') {
+            // Set type and exit loop
+            request.setVersion(identifier);
+            // Commit buffer as the identifier was fully parsed
+            buffer.commit();
+            break;
+          }
+          identifier += c.value();
+        }
       }
 
+      // Parse headers
+      identifier = "";
+      while (1) {
+        if (!(c = buffer.next()).has_value()) {
+          // Rollback buffer as not enough data is provided
+          buffer.rollback();
+          return;
+        }
+        // Skip carriage return as termination is based on newline
+        if (c.value()=='\r') continue;
+        // If newline is read, this indicates the end of the header
+        if (c.value()=='\n') {
+          // Commit buffer and exit deserialization
+          buffer.commit();
+          return;
+        }
 
-      
+        // Read until key value delimiter
+        if (c.value()==':') {
+          if (!(c = buffer.next()).has_value()) {
+            buffer.rollback();
+            return;
+          }
+          // Expect ' ' after ':'
+          if (c.value()!=' ') {
+            throw runtime_error(
+              "Expected space (' ') character after colon (':'). Got " + to_string(c.value())
+            );
+          }
+          
+          // Read value
+          string value = "";
+          while (1) {
+            if (!(c = buffer.next()).has_value()) {
+              buffer.rollback();
+              return;
+            }
+
+            // Skip carriage return as termination is based on newline
+            if (c.value()=='\r') continue;
+            // If newline is read, this indicates the end of this header
+            if (c.value()=='\n') {
+              // Set header
+              request.setHeader(identifier, value);
+              // Reset identifier
+              identifier = "";
+              // Commit and exit loop
+              buffer.commit();
+              break;
+            }
+            value += c.value();
+          }
+          identifier += c.value();
+        }
+      }
     }
 
+    /**
+     * Process user defined function based on connection state
+     *
+     * Returns false if the connection should be closed
+     */
+    bool ProcessFunction(internal::ConnectionState &state) {
+      // TODO:
+      
+      // Route based on state.request.getPath()
+
+      // Execute function
+
+      // Handle body reader
+      return true;
+    }
+
+    /**
+     * Process response based on connection state
+     *
+     * Returns false if the connection should be closed
+     */
     bool ProcessResponse(internal::ConnectionState &state) {
       if (state.resBuffer.empty()) {
         // Set date header to now
@@ -986,7 +1157,7 @@ namespace SimpleHTTP {
           }
         }
         // Increment res buffer by the read bytes
-        state.resBuffer.incCursor(n);
+        state.resBuffer.increment(n);
         // Check if all data is sent, if yes the operation is finished
         if (state.resBuffer.sizeAfterCursor() < 1) {
           // If connection header is set to "close". Explicitly close the connection
