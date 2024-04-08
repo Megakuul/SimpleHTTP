@@ -27,6 +27,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -216,6 +217,7 @@ namespace SimpleHTTP {
       headers["Content-Length"] = to_string(body.length());
       return *this;
     }
+    
   private:
     // HTTP Version, constant as simpleHTTP only supports HTTP/1.1
     string version = "HTTP/1.1";
@@ -312,6 +314,7 @@ namespace SimpleHTTP {
       mutex fd_mut;
     };
 
+    
 
     /**
      * Stage defines various stages for a http connection
@@ -530,6 +533,11 @@ namespace SimpleHTTP {
     const int maxEventsPerLoop = 12;
     // Defines the maximum size of the header. If exceeded request will fail
     const int maxHeaderSize = 8192;
+
+    // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
+    // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
+    // with their respective handler functions.
+    unordered_map<string, unordered_map<string, function<void(Request, Response)>>> routeMap;
     
   public:
     Server() = delete;
@@ -1119,6 +1127,30 @@ namespace SimpleHTTP {
      * Returns false if the connection should be closed
      */
     bool ProcessFunction(internal::ConnectionState &state) {
+      // Find route
+      auto routeIter = routeMap.find(state.request.getPath());
+      if (routeIter != routeMap.end()) {
+        state.response
+          .setStatusCode(404)
+          .setStatusReason("Not Found")
+          .setContentType("text/plain")
+          .setBody("The requested resource "+state.request.getPath()+" was not found on this server");
+        state.stage = internal::RES;
+        return true;
+      }
+      // Find type / method on the route
+      auto handlerIter = routeIter->second.find(state.request.getType());
+      if (handlerIter != routeIter->second.end()) {
+        state.response
+          .setStatusCode(405)
+          .setStatusReason("Method Not Allowed")
+          .setContentType("text/plain")
+          .setBody("The method "+state.request.getType()+" is not allowed for the requested resource");
+        state.stage = internal::RES;
+        return true;
+      }
+
+      handlerIter->second(state.request, state.response);
       // TODO:
       
       // Route based on state.request.getPath()
