@@ -24,10 +24,12 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <coroutine>
 #include <cstring>
 #include <ctime>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -35,6 +37,7 @@
 #include <string>
 #include <filesystem>
 #include <format>
+#include <iterator>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -52,184 +55,6 @@ using namespace std;
 namespace fs = filesystem;
 
 namespace SimpleHTTP {
-
-  /**
-   * Http Request object retrieved upon successful connection
-   *
-   * This object contains http header information and functions to work with the http body
-   */
-  class Request {
-  public:
-
-    string getType() const noexcept {
-      return type;
-    }
-
-    Request& setType(string newtype) {
-      type = newtype;
-      return *this;
-    }
-    
-    string getPath() const noexcept {
-      return path;
-    }
-
-    Request& setPath(string newpath) {
-      path = newpath;
-      return *this;
-    }
-
-    string getVersion() const noexcept {
-      return version;
-    }
-
-    Request& setVersion(string newversion) {
-      version = newversion;
-      return *this;
-    }
-
-    string getHeader(string key) {
-      return headers[key];
-    }
-
-    Request& setHeader(string key, string value) {
-      headers[key] = value;
-      return *this;
-    }
-    
-  private:
-    // HTTP Type (e.g. Get, Post, etc.)
-    string type;
-    // HTTP Path (e.g. /api/some)
-    string path;
-    // HTTP Version (e.g. HTTP/1.1)
-    string version;
-
-    // HTTP headers
-    unordered_map<string, string> headers;
-  };
-
-  /**
-   * Http Response object used to answer the http request
-   *
-   * This object contains http header information
-   */
-  class Response {
-  public:
-    string getVersion() const noexcept {
-      return version;
-    }
-    
-    uint getStatusCode() const noexcept {
-      return statusCode;
-    }
-    
-    Response& setStatusCode(uint newstatuscode) {
-      statusCode = newstatuscode;
-      return *this;
-    }
-
-    string getStatusReason() const noexcept {
-      return statusReason;
-    }
-
-    Response& setStatusReason(string newstatusreason) {
-      statusReason = newstatusreason;
-      return *this;
-    }
-
-    optional<string> getContentType() {
-      auto it = headers.find("Content-Type");
-      if (it != headers.end()) {
-        return it->second;
-      } else
-        return nullopt;
-    }
-
-    Response& setContentType(string newcontenttype) {
-      headers["Content-Type"] = newcontenttype;
-      return *this;
-    }
-
-    optional<chrono::system_clock::time_point> getDate() {
-      auto it = headers.find("Date");
-      if (it == headers.end()) {
-        return nullopt;
-      }
-
-      // Create input stream to parse the time
-      istringstream iss(it->second);
-      tm date_tm = {};
-      // Parse from IMF_fixdate
-      iss >> get_time(&date_tm, "%a, %d %b %Y %H:%M:%S");
-
-      if (iss.fail()) {
-        // If it fails return nullopt
-        return nullopt;
-      } else {
-        // If succeeded, convert to time_t and the time_t to a time_point
-        return chrono::system_clock::from_time_t(mktime(&date_tm));
-      }
-    }
-
-    Response& setDate(chrono::system_clock::time_point newdate) {
-      // Convert to time_t
-      time_t newdate_t = chrono::system_clock::to_time_t(newdate);
-      // Convert to GMT
-      tm newdate_tm = *gmtime(&newdate_t);
-
-      ostringstream oss;
-      // Parse to the IMF_fixdate format
-      oss << put_time(&newdate_tm, "%a, %d %b %Y %H:%M:%S GMT");
-      headers["Date"] = oss.str();
-      return *this;
-    }
-
-    unordered_map<string, string>& getHeaders() {
-      return headers;
-    }
-
-    optional<string> getHeader(string key) {
-      auto it = headers.find(key);
-      if (it != headers.end()) {
-        return it->second;
-      } else
-        return nullopt;
-    }
-
-    Response& setHeader(string key, string newvalue) {
-      headers[key] = newvalue;
-      return *this;
-    }
-
-    string getBody() {
-      return body;
-    }
-
-    Response& setBody(string newbody) {
-      body = newbody;
-      headers["Content-Length"] = to_string(body.length());
-      return *this;
-    }
-
-    Response& appendBody(string appendbody) {
-      body += appendbody;
-      headers["Content-Length"] = to_string(body.length());
-      return *this;
-    }
-    
-  private:
-    // HTTP Version, constant as simpleHTTP only supports HTTP/1.1
-    string version = "HTTP/1.1";
-    // HTTP Status code, default is 200
-    uint statusCode = 200;
-    // HTTP Status reason, default is OK
-    string statusReason = "OK";
-    // HTTP headers
-    unordered_map<string, string> headers;
-    // Body represented as string
-    string body = "";
-  };
 
   // Namespace declared for internal helper / supporter functions & classes
   namespace internal {
@@ -490,7 +315,362 @@ namespace SimpleHTTP {
       int headCursor = 0;
       int rollbackCursor = 0;
     };
+
+    /**
+     * Generic return type for a coroutine
+     */ 
+    template <typename T>
+    struct Task {
+      // Define promise type (predefined coroutine struct)
+      struct promise_type {
+        // Generic return value
+        T value;
+        // Exception ptr
+        exception_ptr exception = nullptr;
+        // Predefined coroutine function called when creating the coroutine
+        Task get_return_object() {
+          return Task{coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        // Predefined function called when coroutine is initialized
+        suspend_never initial_suspend() { return {}; }
+        // Predefined function called before coroutine is destroyed (value is returned)
+        suspend_never final_suspend() noexcept { return {}; } // Don't suspend, directly destroy coroutine
+        // Predefined function called when returning the value (co_return)
+        void return_value(T v) { value = v; } // Store return value in promise frame before handle is destroyed
+        // Predefined function called when exception is thrown
+        void unhandled_exception() { exception = current_exception(); } // Store exception to handle it later
+      };
+      // Main coroutine handle
+      coroutine_handle<promise_type> coro;
+      // Constructor to initialize handle
+      Task(coroutine_handle<promise_type> h) : coro(h) {}
+      // Destructor to cleanup handle
+      ~Task() { if (coro) coro.destroy(); }
+
+      // Predefined function called when this coroutine itself is about to be suspended
+      bool await_ready() const noexcept { return false; } // Always return false which suspends
+
+      // Predefined function called when this coroutine is suspended
+      void await_suspend(coroutine_handle<> h) const {}
+      // Predefined function called when this coroutine is resumed
+      void await_resume() const noexcept {
+        coro.resume();
+      }
+
+
+      /**
+       * Resumes execution of the coroutine
+       *
+       * If the coroutine is suspended, it will return nullopt
+       * otherwise the return value is returned
+       *
+       * Throws a logic_error if coroutine is accessed after its completed
+       * Rethrows exception if the coroutine completed with an uncaught exception
+       */
+      optional<T> resume() {
+        if (!coro || coro.done()) {
+          // Resuming coroutine which is done() is undefined
+          throw logic_error("Attempt to resume a completed coroutine");
+        }
+        // Resume coroutine
+        coro.resume();
+        if (coro.done()) {
+          // If coroutine returned, handle return / exception
+
+          // Rethrow exception on exception
+          if (coro.promise().exception) {
+            rethrow_exception(coro.promise().exception);
+          }
+          // Return value
+          return coro.promise().value;
+        } else {
+          // Else return nullopt
+          return nullopt;
+        }
+      }
+    };
+  }
+
+  /**
+   * Basic coroutine resumer
+   *
+   * The resumer just suspends execution but does not perform any middelware code
+   */
+  struct BasicResumer {
+    // Predefined coroutine function to check if it shouldn't suspend
+    bool await_ready() {
+      // Always suspend
+      return false;
+    }
     
+    // Predefined coroutine function called before suspended
+    void await_suspend(coroutine_handle<> h) {
+      // Resumer just stores the coroutine handle
+      // Actions are performed inside the coroutine controlled via simplehttp eventloop
+      coro = h;
+    }
+
+    // Predefined coroutine function called before execution continues
+    void await_resume() {}
+  };
+
+  class BodyReader {
+    
+  public:
+    BodyReader(
+      internal::FileDescriptor* socket,
+      int socketBufferSize,
+      int bodySize
+    ) :
+      socket(socket),
+      socketBufferSize(socketBufferSize),
+      bodySize(bodySize)
+    {}
+
+    internal::Task<vector<unsigned char>> read(int size) {
+      // Cap size to body size if size is larger then body
+      size = size>bodySize ? bodySize : size;
+      
+      while (1) {
+        // If bodySize is <= 0 an empty vector is returned
+        if (bodySize<=0) {
+          co_return {};
+        }
+        // Check if readBuffer contains enough data or if the full body was read
+        if (readBuffer.size() >= size) {
+          // Copy the requested size into a temporary slice
+          vector<unsigned char> slice(readBuffer.begin(), readBuffer.begin()+size);
+          // Erase the removed data from the buffer
+          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+size);
+          // Decrement body size
+          bodySize -= size;
+          // Return (move) slice to the coroutine
+          co_return slice;
+        }
+
+        // Try to load the full socketBufferSize to the readBuffer
+        // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
+        unsigned char buffer[socketBufferSize];
+        int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // If the call blocks, push control to resumer which suspends coroutine
+            // Will be resumed by the simplehttp eventloop if data is available
+            co_await BasicResumer{};
+          } else {
+            // Throw empty exception. The eventloop will close and cleanup the tcp connection
+            throw;
+          }
+        }
+        // Insert received data to readBuffer
+        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
+      }
+    }
+    
+  private:
+    // Socket filedescriptor
+    internal::FileDescriptor* socket;
+    // Socket buffer size
+    int socketBufferSize;
+    // Remaining body size (this value is decremented when reading the body)
+    int bodySize;
+    // Temporary buffer holding the received data
+    // Data which is read from the user is erased from this
+    vector<unsigned char> readBuffer;
+  };
+
+
+  /**
+   * Http Request object retrieved upon successful connection
+   *
+   * This object contains http header information and functions to work with the http body
+   */
+  class Request {
+  public:
+
+    string getType() const noexcept {
+      return type;
+    }
+
+    Request& setType(string newtype) {
+      type = newtype;
+      return *this;
+    }
+    
+    string getPath() const noexcept {
+      return path;
+    }
+
+    Request& setPath(string newpath) {
+      path = newpath;
+      return *this;
+    }
+
+    string getVersion() const noexcept {
+      return version;
+    }
+
+    Request& setVersion(string newversion) {
+      version = newversion;
+      return *this;
+    }
+
+    string getHeader(string key) {
+      return headers[key];
+    }
+
+    Request& setHeader(string key, string value) {
+      headers[key] = value;
+      return *this;
+    }
+    
+  private:
+    // HTTP Type (e.g. Get, Post, etc.)
+    string type;
+    // HTTP Path (e.g. /api/some)
+    string path;
+    // HTTP Version (e.g. HTTP/1.1)
+    string version;
+
+    // HTTP headers
+    unordered_map<string, string> headers;
+  };
+
+
+  class Body {
+  public:
+    void handleReads() {
+
+    }
+
+  private:
+    
+  };
+
+  /**
+   * Http Response object used to answer the http request
+   *
+   * This object contains http header information
+   */
+  class Response {
+  public:
+    string getVersion() const noexcept {
+      return version;
+    }
+    
+    uint getStatusCode() const noexcept {
+      return statusCode;
+    }
+    
+    Response& setStatusCode(uint newstatuscode) {
+      statusCode = newstatuscode;
+      return *this;
+    }
+
+    string getStatusReason() const noexcept {
+      return statusReason;
+    }
+
+    Response& setStatusReason(string newstatusreason) {
+      statusReason = newstatusreason;
+      return *this;
+    }
+
+    optional<string> getContentType() {
+      auto it = headers.find("Content-Type");
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    Response& setContentType(string newcontenttype) {
+      headers["Content-Type"] = newcontenttype;
+      return *this;
+    }
+
+    optional<chrono::system_clock::time_point> getDate() {
+      auto it = headers.find("Date");
+      if (it == headers.end()) {
+        return nullopt;
+      }
+
+      // Create input stream to parse the time
+      istringstream iss(it->second);
+      tm date_tm = {};
+      // Parse from IMF_fixdate
+      iss >> get_time(&date_tm, "%a, %d %b %Y %H:%M:%S");
+
+      if (iss.fail()) {
+        // If it fails return nullopt
+        return nullopt;
+      } else {
+        // If succeeded, convert to time_t and the time_t to a time_point
+        return chrono::system_clock::from_time_t(mktime(&date_tm));
+      }
+    }
+
+    Response& setDate(chrono::system_clock::time_point newdate) {
+      // Convert to time_t
+      time_t newdate_t = chrono::system_clock::to_time_t(newdate);
+      // Convert to GMT
+      tm newdate_tm = *gmtime(&newdate_t);
+
+      ostringstream oss;
+      // Parse to the IMF_fixdate format
+      oss << put_time(&newdate_tm, "%a, %d %b %Y %H:%M:%S GMT");
+      headers["Date"] = oss.str();
+      return *this;
+    }
+
+    unordered_map<string, string>& getHeaders() {
+      return headers;
+    }
+
+    optional<string> getHeader(string key) {
+      auto it = headers.find(key);
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    Response& setHeader(string key, string newvalue) {
+      headers[key] = newvalue;
+      return *this;
+    }
+
+    string getBody() {
+      return body;
+    }
+
+    Response& setBody(string newbody) {
+      body = newbody;
+      headers["Content-Length"] = to_string(body.length());
+      return *this;
+    }
+
+    Response& appendBody(string appendbody) {
+      body += appendbody;
+      headers["Content-Length"] = to_string(body.length());
+      return *this;
+    }
+    
+  private:
+    // HTTP Version, constant as simpleHTTP only supports HTTP/1.1
+    string version = "HTTP/1.1";
+    // HTTP Status code, default is 200
+    uint statusCode = 200;
+    // HTTP Status reason, default is OK
+    string statusReason = "OK";
+    // HTTP headers
+    unordered_map<string, string> headers;
+    // Body represented as string
+    string body = "";
+  };
+
+
+  namespace internal {
     /**
      * ConnectionState holds the state of a http connection
      */
@@ -509,7 +689,6 @@ namespace SimpleHTTP {
   }
 
   
-
   /**
    * HTTP Server object bound to one bsd socket
    *
