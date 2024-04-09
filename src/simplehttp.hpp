@@ -37,7 +37,6 @@
 #include <string>
 #include <filesystem>
 #include <format>
-#include <iterator>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -47,7 +46,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 
 using namespace std;
@@ -145,9 +146,11 @@ namespace SimpleHTTP {
      * Stage defines various stages for a http connection
      */
     enum Stage {
-      REQ = 1, // Request is currently received
-      FUNC = 2, // User defined function is currently executed
-      RES = 3 // Response is currently sent
+      REQ = 1, // Request must be handled
+      RES = 2, // Response must be handled
+      FUNC_INIT = 2, // User defined function must be initialized
+      FUNC_PROC = 3, // User defined function must be processed
+      FUNC_BODY = 4, // Function blocks and body must be handled
     };
 
 
@@ -283,6 +286,20 @@ namespace SimpleHTTP {
       }
 
       /**
+       * Get copy of the underlying string from index 0
+       */
+      string str() {
+        return buffer;
+      }
+
+      /**
+       * Get copy of the underlying data from index 0
+       */
+      vector<unsigned char> vec() {
+        return vector<unsigned char>(buffer.begin(), buffer.end());
+      }
+
+      /**
        * Returns the size of the buffer from index 0
        */
       int size() {
@@ -295,6 +312,20 @@ namespace SimpleHTTP {
       const char* cstrAfterCursor() {
         return &buffer[headCursor];
       }
+
+      /**
+       * Get copy of the underlying string from the head cursor
+       */
+      string strAfterCursor() {
+        return string(buffer.begin()+headCursor, buffer.end());
+      }
+
+      /**
+       * Get copy of the underlying data from the head cursor
+       */
+      vector<unsigned char> vecAfterCursor() {
+        return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
+      }      
 
       /**
        * Returns the size of the buffer from the head cursor
@@ -317,10 +348,15 @@ namespace SimpleHTTP {
     };
 
     /**
-     * Generic return type for a coroutine
+     * Generic handle wrapper for coroutine
+     *
+     * Used as return type from coroutines
+     *
+     * Makes sure the underlying coroutine_handle is only attached to one Task
      */ 
     template <typename T>
-    struct Task {
+    class Task {
+    public:
       // Define promise type (predefined coroutine struct)
       struct promise_type {
         // Generic return value
@@ -332,7 +368,7 @@ namespace SimpleHTTP {
           return Task{coroutine_handle<promise_type>::from_promise(*this)};
         }
         // Predefined function called when coroutine is initialized
-        suspend_never initial_suspend() { return {}; }
+        suspend_always initial_suspend() { return {}; }
         // Predefined function called before coroutine is destroyed (value is returned)
         suspend_never final_suspend() noexcept { return {}; } // Don't suspend, directly destroy coroutine
         // Predefined function called when returning the value (co_return)
@@ -340,23 +376,43 @@ namespace SimpleHTTP {
         // Predefined function called when exception is thrown
         void unhandled_exception() { exception = current_exception(); } // Store exception to handle it later
       };
-      // Main coroutine handle
-      coroutine_handle<promise_type> coro;
+
+      // Default constructor sets coroutine to nullptr
+      Task() : coro(nullptr) {}
       // Constructor to initialize handle
       Task(coroutine_handle<promise_type> h) : coro(h) {}
       // Destructor to cleanup handle
       ~Task() { if (coro) coro.destroy(); }
 
-      // Predefined function called when this coroutine itself is about to be suspended
-      bool await_ready() const noexcept { return false; } // Always return false which suspends
+      // Delete copy constructor
+      Task(const Task&) = delete;
 
-      // Predefined function called when this coroutine is suspended
-      void await_suspend(coroutine_handle<> h) const {}
-      // Predefined function called when this coroutine is resumed
-      void await_resume() const noexcept {
-        coro.resume();
+      // Move constructor explicitly sets the other coroutine to nullptr
+      // To prevent double destruction
+      Task(Task&& other) noexcept : coro(other.coro) {
+        other.coro = nullptr;
+      }
+      
+      // Delete copy assignment
+      Task& operator=(const Task&) = delete;
+
+      // Move assignment explicitly sets the other coroutine to nullptr
+      // and destroys the local coroutine to prevent double destruction
+      Task& operator=(Task&& other) noexcept {
+        if (&other!=this) {
+          if (coro) coro.destroy();
+          coro = other.coro;
+          other.coro = nullptr;
+        }
+        return *this;
       }
 
+      /**
+       * Checks if coroutine is done/destroyed
+       */
+      bool done() {
+        return !coro || coro.done();
+      }
 
       /**
        * Resumes execution of the coroutine
@@ -388,97 +444,11 @@ namespace SimpleHTTP {
           return nullopt;
         }
       }
+    private:
+      // Main coroutine handle
+      coroutine_handle<promise_type> coro;
     };
   }
-
-  /**
-   * Basic coroutine resumer
-   *
-   * The resumer just suspends execution but does not perform any middelware code
-   */
-  struct BasicResumer {
-    // Predefined coroutine function to check if it shouldn't suspend
-    bool await_ready() {
-      // Always suspend
-      return false;
-    }
-    
-    // Predefined coroutine function called before suspended
-    void await_suspend(coroutine_handle<> h) {
-      // Resumer just stores the coroutine handle
-      // Actions are performed inside the coroutine controlled via simplehttp eventloop
-      coro = h;
-    }
-
-    // Predefined coroutine function called before execution continues
-    void await_resume() {}
-  };
-
-  class BodyReader {
-    
-  public:
-    BodyReader(
-      internal::FileDescriptor* socket,
-      int socketBufferSize,
-      int bodySize
-    ) :
-      socket(socket),
-      socketBufferSize(socketBufferSize),
-      bodySize(bodySize)
-    {}
-
-    internal::Task<vector<unsigned char>> read(int size) {
-      // Cap size to body size if size is larger then body
-      size = size>bodySize ? bodySize : size;
-      
-      while (1) {
-        // If bodySize is <= 0 an empty vector is returned
-        if (bodySize<=0) {
-          co_return {};
-        }
-        // Check if readBuffer contains enough data or if the full body was read
-        if (readBuffer.size() >= size) {
-          // Copy the requested size into a temporary slice
-          vector<unsigned char> slice(readBuffer.begin(), readBuffer.begin()+size);
-          // Erase the removed data from the buffer
-          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+size);
-          // Decrement body size
-          bodySize -= size;
-          // Return (move) slice to the coroutine
-          co_return slice;
-        }
-
-        // Try to load the full socketBufferSize to the readBuffer
-        // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
-        unsigned char buffer[socketBufferSize];
-        int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
-        if (n < 0) {
-          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // If the call blocks, push control to resumer which suspends coroutine
-            // Will be resumed by the simplehttp eventloop if data is available
-            co_await BasicResumer{};
-          } else {
-            // Throw empty exception. The eventloop will close and cleanup the tcp connection
-            throw;
-          }
-        }
-        // Insert received data to readBuffer
-        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
-      }
-    }
-    
-  private:
-    // Socket filedescriptor
-    internal::FileDescriptor* socket;
-    // Socket buffer size
-    int socketBufferSize;
-    // Remaining body size (this value is decremented when reading the body)
-    int bodySize;
-    // Temporary buffer holding the received data
-    // Data which is read from the user is erased from this
-    vector<unsigned char> readBuffer;
-  };
-
 
   /**
    * Http Request object retrieved upon successful connection
@@ -515,11 +485,71 @@ namespace SimpleHTTP {
       return *this;
     }
 
-    string getHeader(string key) {
-      return headers[key];
+    optional<int> getContentLength() {
+      auto it = headers.find("content-length");
+      if (it == headers.end()) return nullopt;
+
+      // Convert value to integer with istringstream
+      istringstream iss(it->second);
+      int length;
+      if (iss >> length)
+        return length;
+      else return nullopt;
     }
 
+    optional<unordered_set<string>> getTransferEncoding() {
+      auto it = headers.find("transfer-encoding");
+      if (it == headers.end()) return nullopt;
+
+      unordered_set<string> tokens;
+      istringstream iss(it->second);
+      string currentItem;
+      // Parse Transfer Encodings
+      while (getline(iss, currentItem, ',')) {
+        // Trim off spaces
+        auto start = currentItem.find_first_not_of(" ");
+        auto end = currentItem.find_last_not_of(" ");
+        // Skip if no regular char was found in the item
+        if (start==string::npos || end==string::npos) continue;
+        // Insert slice without spaces 
+        tokens.insert(currentItem.substr(start, end - start + 1));
+      }
+      // If no tokens are found return nullopt
+      if (tokens.empty()) return nullopt;
+      return tokens;
+    }
+
+    /**
+     * Get a header from the request
+     *
+     * Key & value are strictly lowercase
+     */
+    optional<string> getHeader(string key) {
+      auto it = headers.find(key);
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    /**
+     * Set a header to the request
+     *
+     * Key & value are converted to lowercase
+     */
     Request& setHeader(string key, string value) {
+      // Key & value are converted tolower
+      // in order to properly handle those in the internal structure
+      
+      // Convert key tolower
+      transform(key.begin(), key.end(), key.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
+      // Convert value tolower
+      transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
+      // Set kv pair
       headers[key] = value;
       return *this;
     }
@@ -537,14 +567,201 @@ namespace SimpleHTTP {
   };
 
 
+  
   class Body {
   public:
-    void handleReads() {
+    Body();
+    
+    Body(
+      internal::FileDescriptor* socket,
+      int socketBufferSize,
+      int bodySize,
+      vector<unsigned char> initBuffer
+    ) :
+      socket(socket),
+      socketBufferSize(socketBufferSize),
+      bodySize(bodySize),
+      readBuffer(initBuffer)
+    {}
 
+    struct Reader {
+      Body& body;
+      int size;
+      vector<unsigned char> outBuffer;
+
+      bool await_ready() const noexcept { return false; }
+
+      void await_suspend(coroutine_handle<> h) {
+        body.request = ReadRequest{size, &outBuffer};
+      }
+
+      vector<unsigned char> await_resume() const noexcept {
+        body.request = nullopt;
+        return outBuffer;
+      }
+    };
+
+    Reader read(int size) {
+      return Reader{*this, size};
     }
 
-  private:
+    Reader readAll() {
+      return Reader{*this, bodySize};
+    }
+
+    virtual bool processRequest();
     
+  protected:
+    // Datastructure to read a certain amount of data from the body
+    struct ReadRequest {
+      int size;
+      vector<unsigned char>* outBuffer;
+    };
+    
+    // Socket filedescriptor
+    internal::FileDescriptor* socket;
+    // Socket buffer size
+    int socketBufferSize;
+    // Remaining body size (this value is decremented when reading the body)
+    int bodySize;
+    // Temporary buffer holding the received data
+    // Data which is read from the user is erased from this
+    vector<unsigned char> readBuffer;
+    // Current pending read request
+    optional<ReadRequest> request;
+  };
+
+  class FixedBody : public Body {
+  public:
+    FixedBody(
+      internal::FileDescriptor* socket,
+      int socketBufferSize,
+      int bodySize,
+      vector<unsigned char> initBuffer
+    ) : Body(socket, socketBufferSize, bodySize, initBuffer) {}
+    
+    /**
+     * Reads the body with a fixed size (HTTP Content-Length header is set)
+     *
+     * Reads the data requested by the ReadRequest into the outBuffer
+     * and updates the bodySize of the Body accordingly
+     *
+     * Data is read buffered, which means it reads the defined socketBufferSize
+     * into the readBuffer and then returns the requested amount of data.
+     *
+     * Returns true if the requested amount or the full body was read.
+     * Returns false if the requested amount was not read but the socket blocks
+     * Throws a runtime_error containing the errno message if the underlying connection fails
+     */
+    bool processRequest() override {
+      // If no value is in queue return true to continue      
+      if (!request.has_value()) return true;
+      ReadRequest req = request.value();
+      
+      // Cap size to body size if size is larger then body
+      req.size = req.size>bodySize ? bodySize : req.size;
+      
+      while (1) {
+        // If bodySize is <= 0 an empty vector is returned
+        if (bodySize<=0) {
+          *req.outBuffer = {};
+          return true;
+        }
+        // Check if readBuffer contains enough data or if the full body was read
+        if (readBuffer.size() >= req.size) {
+          // Copy the requested size into a temporary slice
+          *req.outBuffer = vector<unsigned char>(readBuffer.begin(), readBuffer.begin()+req.size);
+          // Erase the removed data from the buffer
+          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+req.size);
+          // Decrement body size
+          bodySize -= req.size;
+          return true;
+        }
+
+        // Try to load the full socketBufferSize to the readBuffer
+        // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
+        unsigned char buffer[socketBufferSize];
+        int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // If the call blocks, push control to resumer which suspends coroutine
+            // Will be resumed by the simplehttp eventloop if data is available
+            return false;
+          } else {
+            // Throw exception. The eventloop will close and cleanup the tcp connection
+            throw runtime_error(strerror(errno));
+          }
+        }
+        // Insert received data to readBuffer
+        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
+      }
+    }
+  };
+
+  
+  class ChunkedBody : public Body {
+  public:
+    ChunkedBody(
+      internal::FileDescriptor* socket,
+      int socketBufferSize,
+      vector<unsigned char> initBuffer
+    ) : Body(socket, socketBufferSize, 0, initBuffer) {}
+    
+    /**
+     * Reads the body with transfer encoding "chunked"
+     *
+     * Reads the data requested by the ReadRequest into the outBuffer
+     *
+     * Data is read buffered, which means it reads the defined socketBufferSize
+     * into the readBuffer and then returns the requested amount of data.
+     *
+     * Returns true if the requested amount or the full body was read.
+     * Returns false if the requested amount was not read but the socket blocks
+     * Throws a runtime_error containing the errno message if the underlying connection fails
+     */
+    bool processRequest() override {
+      // If no value is in queue return true to continue      
+      if (!request.has_value()) return true;
+      ReadRequest req = request.value();
+      
+      // Cap size to body size if size is larger then body
+      req.size = req.size>bodySize ? bodySize : req.size;
+      
+      while (1) {
+        // If bodySize is <= 0 an empty vector is returned
+        if (bodySize<=0) {
+          *req.outBuffer = {};
+          return true;
+        }
+        // Check if readBuffer contains enough data or if the full body was read
+        if (readBuffer.size() >= req.size) {
+          // Copy the requested size into a temporary slice
+          *req.outBuffer = vector<unsigned char>(readBuffer.begin(), readBuffer.begin()+req.size);
+          // Erase the removed data from the buffer
+          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+req.size);
+          // Decrement body size
+          bodySize -= req.size;
+          return true;
+        }
+
+        // Try to load the full socketBufferSize to the readBuffer
+        // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
+        unsigned char buffer[socketBufferSize];
+        int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // If the call blocks, push control to resumer which suspends coroutine
+            // Will be resumed by the simplehttp eventloop if data is available
+            return false;
+          } else {
+            // Throw exception. The eventloop will close and cleanup the tcp connection
+            throw runtime_error(strerror(errno));
+          }
+        }
+        // Insert received data to readBuffer
+        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
+      }
+    }
   };
 
   /**
@@ -683,6 +900,10 @@ namespace SimpleHTTP {
       Buffer resBuffer;
       // Request object
       Request request;
+      // Coroutine (function) frame
+      Task<bool> funcHandle;
+      // Body object
+      Body body;
       // Response object
       Response response;
     };
@@ -716,7 +937,7 @@ namespace SimpleHTTP {
     // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
     // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
     // with their respective handler functions.
-    unordered_map<string, unordered_map<string, function<void(Request, Response)>>> routeMap;
+    unordered_map<string, unordered_map<string, function<internal::Task<bool>(Request, Body, Response)>>> routeMap;
     
   public:
     Server() = delete;
@@ -907,6 +1128,22 @@ namespace SimpleHTTP {
     };
 
     /**
+     * Adds a route to the server
+     */
+    void Route(string method, string route, function<internal::Task<bool>(Request, Body, Response)> func) {
+      auto routeIter = routeMap.find(route);
+      if (routeIter != routeMap.end()) {
+        routeIter->second[method] = func;
+      } else {
+        routeMap.emplace(
+          route,
+          unordered_map<string, function<internal::Task<void>(Request, Response)>>()
+        );
+        routeMap[route][method] = func;
+      }
+    }
+
+    /**
      * Serve launches the HTTP server
      *
      * tcp listener is initialized and the main event loop is started
@@ -1084,7 +1321,15 @@ namespace SimpleHTTP {
                 }
               }
               break;
-            case internal::Stage::FUNC:
+            case internal::Stage::FUNC_BODY:
+              // Only process if EPOLLIN event is reported
+              if (conEvents[i].events & EPOLLIN) {
+                // Continue process body
+                if (!ProcessBody(conStateIter->second)) {
+                  // If encountered critical error, just close connection (erase from map)
+                  conStateMap.erase(conStateIter);
+                }
+              }
               break;
             case internal::Stage::RES:
               // Only process if EPOLLOUT event is reported
@@ -1096,6 +1341,8 @@ namespace SimpleHTTP {
                   conStateMap.erase(conStateIter);
                 }
               }
+              break;
+            default:
               break;
             }
           }
@@ -1149,12 +1396,17 @@ namespace SimpleHTTP {
 
         // Parse current buffer
         try {
-          DeserializeRequest(state.reqBuffer, state.request);
+          // Deserialize request
+          bool res = DeserializeRequest(state.reqBuffer, state.request);
           // Check if serialized part before cursor exceeds maxHeaderSize.
           // This check, performed post-serialization, ensures body parts in the buffer
           // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
           if (state.reqBuffer.sizeBeforeCursor()>maxHeaderSize) {
             throw runtime_error("Header size exceeds defined maximum size");
+          }
+          // If request is not fully deserialized; continue fetching data
+          if (!res) {
+            continue;
           }
         } catch (exception &e) {
           state.response
@@ -1162,9 +1414,59 @@ namespace SimpleHTTP {
             .setStatusReason("Bad Request")
             .setContentType("text/plain")
             .setBody(e.what());
-          state.stage = internal::RES;
+          state.stage = internal::Stage::RES;
           return true;
         }
+
+        // If the request (header) is fully deserialized
+
+        // Analyze transfer encoding
+        // Currently only chunked is supported,
+        // which means other encodings will return an error to then sender
+        bool isChunked = false;
+        auto transferEncoding = state.request.getTransferEncoding();
+        if (transferEncoding.has_value()) {
+          for (auto encoding : transferEncoding.value()) {
+            if (encoding=="chunked")
+              isChunked = true;
+            else {
+              state.response
+                .setStatusCode(501)
+                .setStatusReason("Not Implemented")
+                .setContentType("text/plain")
+                .setBody("Transfer-Encoding "+encoding+" is not supported");
+              state.stage = internal::Stage::RES;
+              return true;
+            }
+          }
+        }
+
+        // Analyze content length
+        // If content length is not specified bodySize is set to 0
+        // assuming no body is provided (except if it is chunked)
+        int bodySize = 0;
+        auto contentLength = state.request.getContentLength();
+        if (contentLength.has_value()) {
+          bodySize = contentLength.value();
+        }
+
+        if (isChunked)
+          // Create body object and move the rest of the reqBuffer to the body readBuffer.
+          // ChunkedBody will interpret data chunked
+          state.body = ChunkedBody(
+            &state.fd, sockBufferSize, state.reqBuffer.vecAfterCursor()
+          );
+        else
+          // Create body object and move the rest of the reqBuffer to the body readBuffer.
+          // FixedBody will interpret data with a fixed length
+          state.body = FixedBody(
+            &state.fd, sockBufferSize, bodySize, state.reqBuffer.vecAfterCursor()
+          );
+          
+        // Reset req buffer
+        state.reqBuffer = "";
+        // Start function execution
+        return InitializeFunction(state);
       }
     }
 
@@ -1174,10 +1476,12 @@ namespace SimpleHTTP {
      * This function works no matter where the buffer cursor is,
      * it parses based on the content of the request members.
      * The function will parse the full buffer into the request.
-     * 
+     *
+     * Returns true if the full header is deserialized
+     * Returns false if it needs more data to fully deserialize
      * Parsing errors will lead to an exception
      */
-    void DeserializeRequest(internal::Buffer &buffer, Request &request) {
+    bool DeserializeRequest(internal::Buffer &buffer, Request &request) {
       string identifier = "";
       optional<char> c;
 
@@ -1187,7 +1491,7 @@ namespace SimpleHTTP {
           if (!(c = buffer.next()).has_value()) {
             // Rollback buffer as not enough data is provided to parse the type
             buffer.rollback();
-            return;
+            return false;
           }
           // Read until space
           if (c.value()==' ') {
@@ -1207,7 +1511,7 @@ namespace SimpleHTTP {
           if (!(c = buffer.next()).has_value()) {
             // Rollback buffer as not enough data is provided to parse the path
             buffer.rollback();
-            return;
+            return false;
           }
           // Read until space
           if (c.value()==' ') {
@@ -1227,7 +1531,7 @@ namespace SimpleHTTP {
           if (!(c = buffer.next()).has_value()) {
             // Rollback buffer as not enough data is provided to parse the version
             buffer.rollback();
-            return;
+            return false;
           }
           // Skip carriage return as termination is based on newline
           if (c.value()=='\r') continue;
@@ -1249,7 +1553,7 @@ namespace SimpleHTTP {
         if (!(c = buffer.next()).has_value()) {
           // Rollback buffer as not enough data is provided
           buffer.rollback();
-          return;
+          return false;
         }
         // Skip carriage return as termination is based on newline
         if (c.value()=='\r') continue;
@@ -1257,14 +1561,14 @@ namespace SimpleHTTP {
         if (c.value()=='\n') {
           // Commit buffer and exit deserialization
           buffer.commit();
-          return;
+          return true;
         }
 
         // Read until key value delimiter
         if (c.value()==':') {
           if (!(c = buffer.next()).has_value()) {
             buffer.rollback();
-            return;
+            return false;
           }
           // Expect ' ' after ':'
           if (c.value()!=' ') {
@@ -1278,7 +1582,7 @@ namespace SimpleHTTP {
           while (1) {
             if (!(c = buffer.next()).has_value()) {
               buffer.rollback();
-              return;
+              return false;
             }
 
             // Skip carriage return as termination is based on newline
@@ -1301,11 +1605,13 @@ namespace SimpleHTTP {
     }
 
     /**
-     * Process user defined function based on connection state
+     * Initialize user defined function (coroutine)
+     *
+     * This step involves initial processing of the function
      *
      * Returns false if the connection should be closed
      */
-    bool ProcessFunction(internal::ConnectionState &state) {
+    bool InitializeFunction(internal::ConnectionState &state) {
       // Find route
       auto routeIter = routeMap.find(state.request.getPath());
       if (routeIter != routeMap.end()) {
@@ -1329,15 +1635,62 @@ namespace SimpleHTTP {
         return true;
       }
 
-      handlerIter->second(state.request, state.response);
-      // TODO:
-      
-      // Route based on state.request.getPath()
+      // Create function handle
+      // Coroutine is immediately suspended due to the promise which uses suspend_always as initial_suspend
+      state.funcHandle = handlerIter->second(state.request, state.body, state.response);
 
-      // Execute function
+      // Directly start processing coroutine
+      return ProcessFunction(state);
+    }
+    
+    /**
+     * Process user defined function based on connection state
+     *
+     * Returns false if the connection should be closed
+     */
+    bool ProcessFunction(internal::ConnectionState &state) {
+      // Resume function execution
+      auto res = state.funcHandle.resume();
+      if (res.has_value()) {
+        // If has value, the function returned
+        if (res.value()) {
+          // If returned successful set stage to response
+          state.stage = internal::Stage::RES;
+          return true;
+        } else {
+          // Handle case if coroutine returned false;
+          return false;
+        }
+      } else {
+        // If no value was provided, the function blocks
+        state.stage = internal::Stage::FUNC_BODY;
+        // Immediately try to process body
+        return ProcessBody(state);
+      }
+    }
 
-      // Handle body reader
-      return true;
+    /**
+     * Process body reader request which blocks the user defined function
+     *
+     * Returns false if the connection should be closed
+     */
+    bool ProcessBody(internal::ConnectionState &state) {
+      try {
+        // Handle pending request
+        if (state.body.processRequest()) {
+          // If the request processor returns true, coroutine can be resumed
+          state.stage = internal::Stage::FUNC_PROC;
+          return ProcessFunction(state);
+        } else {
+          // If the request processor returns false it needs to read more data
+          // In order to do this, the stage remains FUNC_BODY and is processed in the next event loop
+          return true;
+        }
+      } catch (exception _) {
+        // Exception occured on underlying connection
+        // Exit and cleanup connection
+        return false;
+      }
     }
 
     /**
