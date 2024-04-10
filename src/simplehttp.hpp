@@ -146,11 +146,12 @@ namespace SimpleHTTP {
      * Stage defines various stages for a http connection
      */
     enum Stage {
-      REQ = 1, // Request must be handled
-      RES = 2, // Response must be handled
-      FUNC_INIT = 2, // User defined function must be initialized
-      FUNC_PROC = 3, // User defined function must be processed
-      FUNC_BODY = 4, // Function blocks and body must be handled
+      REQ, // Request must be handled
+      RES, // Response must be handled
+      CLEANUP, // Connection must be cleaned up for reuse
+      FUNC_INIT, // User defined function must be initialized
+      FUNC_PROC, // User defined function must be processed
+      FUNC_BODY, // Function blocks and body must be handled
     };
 
 
@@ -579,12 +580,16 @@ namespace SimpleHTTP {
   class Request {
   public:
 
-    string getType() const noexcept {
-      return type;
+    string getMethod() const noexcept {
+      return method;
     }
 
-    Request& setType(string newtype) {
-      type = newtype;
+    Request& setMethod(string newmethod) {
+      // Convert method tolower
+      transform(newmethod.begin(), newmethod.end(), newmethod.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
+      method = newmethod;
       return *this;
     }
     
@@ -593,6 +598,10 @@ namespace SimpleHTTP {
     }
 
     Request& setPath(string newpath) {
+      // Convert path tolower
+      transform(newpath.begin(), newpath.end(), newpath.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
       path = newpath;
       return *this;
     }
@@ -602,6 +611,10 @@ namespace SimpleHTTP {
     }
 
     Request& setVersion(string newversion) {
+      // Convert version tolower
+      transform(newversion.begin(), newversion.end(), newversion.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
       version = newversion;
       return *this;
     }
@@ -676,8 +689,8 @@ namespace SimpleHTTP {
     }
     
   private:
-    // HTTP Type (e.g. Get, Post, etc.)
-    string type;
+    // HTTP Method (e.g. Get, Post, etc.)
+    string method;
     // HTTP Path (e.g. /api/some)
     string path;
     // HTTP Version (e.g. HTTP/1.1)
@@ -705,35 +718,79 @@ namespace SimpleHTTP {
       readBuffer(initBuffer)
     {}
 
+    /**
+     * Awaitable structure to schedule read requests
+     */
     struct Reader {
       Body& body;
       int size;
       vector<unsigned char> outBuffer;
 
+      // Always suspend
       bool await_ready() const noexcept { return false; }
 
+      // Before suspending a new readRequest is created
       void await_suspend(coroutine_handle<> h) {
         body.request = ReadRequest{size, &outBuffer};
       }
 
+      // When resuming, reset the request and return the outBuffer
       vector<unsigned char> await_resume() const noexcept {
         body.request = nullopt;
         return outBuffer;
       }
     };
 
+    /**
+     * Read a specified amount data from the body
+     *
+     * Blocks until every the requested data is read
+     *
+     * This function will return an awaitable and schedules reading to the simplehttp event loop.
+     *
+     * Use this function inside a coroutine like this: "auto body = co_await readAll();"
+     *
+     * Returns a vector containing data. If the full body was read an empty vector is returned
+     */
     Reader read(int size) {
       return Reader{*this, size};
     }
 
+    /**
+     * Read all data from the body
+     *
+     * Blocks until every the full body is read
+     *
+     * This function will return an awaitable and schedules reading to the simplehttp event loop.
+     *
+     * Use this function inside a coroutine like this: "auto body = co_await readAll();"
+     *
+     * Returns a vector containing data. If the full body was read an empty vector is returned
+     */
     Reader readAll() {
       return Reader{*this, bodySize};
     }
 
+    /**
+     * Internal function to process the read request in the event loop
+     *
+     * Don't use this function inside your coroutine.
+     */
     virtual bool processRequest();
+
+    /**
+     * Internal function to drain the body in the event loop
+     *
+     * Don't use this function inside your coroutine.
+     */
+    virtual optional<internal::Buffer> drainBody();
+
+    
     
   protected:
-    // Datastructure to read a certain amount of data from the body
+    /**
+     * Datastructure defining a request to read a certain amount of data from the body
+     */
     struct ReadRequest {
       int size;
       vector<unsigned char>* outBuffer;
@@ -771,8 +828,10 @@ namespace SimpleHTTP {
      * into the readBuffer and then returns the requested amount of data.
      *
      * Returns true if the requested amount or the full body was read.
+     *
      * Returns false if the requested amount was not read but the socket blocks
-     * Throws a runtime_error containing the errno message if the underlying connection fails
+     *
+     * Throws a runtime_error if the connection failed
      */
     bool processRequest() override {
       // If no value is in queue return true to continue      
@@ -788,7 +847,7 @@ namespace SimpleHTTP {
           *req.outBuffer = {};
           return true;
         }
-        // Check if readBuffer contains enough data or if the full body was read
+        // Check if readBuffer contains enough data
         if (readBuffer.size() >= req.size) {
           // Set cursor to requested index + 1 (requested size)
           readBuffer.set(req.size);
@@ -807,8 +866,8 @@ namespace SimpleHTTP {
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
         if (n < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // If the call blocks, push control to resumer which suspends coroutine
-            // Will be resumed by the simplehttp eventloop if data is available
+            // If the call block give the control to the event loop
+            // The event loop will then continue execution if data is available
             return false;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
@@ -817,6 +876,45 @@ namespace SimpleHTTP {
         }
         // Insert received data to readBuffer
         readBuffer.insert(buffer, buffer+n);
+      }
+    }
+
+    /**
+     * Drains the body by reading all remaining body data
+     *
+     * Returns overfetched data if the entire body has been read.
+     * By draining directly on fixedBody, it discards the data immediately without
+     * cycling it through a readBuffer.
+     * Therefore, this will always result in an empty buffer on success.
+     *
+     * Returns nullopt if more data is required and the socket blocks
+     *
+     * Throws a runtime_error if the underlying connection fails
+     */
+    optional<internal::Buffer> drainBody() override {
+      while (1) {
+        // If body is fully read, return true to complete cleanup
+        if (bodySize<=0) {
+          // Return empty buffer as we directly read the data
+          return {};
+        }
+        // Read data into a pseudo buffer
+        // Unlike with chunkedBody, the data is not cycling over readBuffer
+        // This highly improves performance 
+        unsigned char buffer[bodySize];
+        int n = recv(socket->getfd(), buffer, bodySize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // If the call block give the control to the event loop
+            // The event loop will then continue execution if data is available
+            return nullopt;
+          } else {
+            // Throw exception. The eventloop will close and cleanup the tcp connection
+            throw runtime_error(strerror(errno));
+          }
+        }
+        // Decrement body size by the read bytes
+        bodySize -= n;
       }
     }
   };
@@ -843,7 +941,9 @@ namespace SimpleHTTP {
       internal::FileDescriptor* socket,
       int socketBufferSize,
       internal::Buffer initBuffer
-    ) : Body(socket, socketBufferSize, 0, initBuffer) {}
+      // Body size is set to INT_MAX in order that if readAll wants to read all
+      // that it reads until the body is fully read
+    ) : Body(socket, socketBufferSize, INT_MAX, initBuffer) {}
     
     /**
      * Reads the body with transfer encoding "chunked"
@@ -854,8 +954,10 @@ namespace SimpleHTTP {
      * into the readBuffer and then returns the requested amount of data.
      *
      * Returns true if the requested amount or the full body was read.
+     *
      * Returns false if the requested amount was not read but the socket blocks
-     * Throws a runtime_error containing the errno message if the underlying connection fails
+     *
+     * Throws a runtime_error if the connection failed or if the transfer-encoding is invalid
      */
     bool processRequest() override {
       // If no value is in queue return true to continue      
@@ -876,7 +978,7 @@ namespace SimpleHTTP {
           }
         }
         // Check if readBuffer contains enough data or if the full body was read
-        if (rawReadBuffer.size() >= req.size) {
+        if (rawReadBuffer.size() >= req.size || nextChunkSize==0) {
           // Set cursor to requested index + 1 (requested size)
           rawReadBuffer.set(req.size);
           // Copy the requested data (0-requested index) to outBuffer
@@ -892,8 +994,8 @@ namespace SimpleHTTP {
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
         if (n < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // If the call blocks, push control to resumer which suspends coroutine
-            // Will be resumed by the simplehttp eventloop if data is available
+            // If the call block give the control to the event loop
+            // The event loop will then continue execution if data is available
             return false;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
@@ -906,13 +1008,66 @@ namespace SimpleHTTP {
       }      
     }
 
+    /**
+     * Drains the body by reading all remaining body data
+     *
+     * Returns overfetched data if the entire body has been read.
+     * This is necessary because to efficiently drain the body, data is overfetched from recv().
+     * Thus, the data fetched that does not belong to the body is returned.
+     *
+     * The readBuffer is explicitly moved to omit a buffercopy, this means using the Body afterwards leads
+     * to undefined behavior!
+     *
+     * Returns nullopt if more data is required and the socket blocks
+     *
+     * Throws a runtime_error if the underlying connection fails
+     */
+    optional<internal::Buffer> drainBody() override {
+      while (1) {
+        // Process data from buffer
+        while(1) {
+          if (readChunkState) {
+            if (!skipChunkData()) {
+              break;
+            }
+          } else {
+            if (!processChunkSize()) {
+              break;
+            }
+          }
+        }
+        // Check if readBuffer contains enough data or if the full body was read
+        if (nextChunkSize==0) {
+          return std::move(readBuffer);
+        }
+
+        // Try to load the full socketBufferSize to the readBuffer
+        unsigned char buffer[socketBufferSize];
+        int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
+        if (n < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // If the call block give the control to the event loop
+            // The event loop will then continue execution if data is available
+            return nullopt;
+          } else {
+            // Throw exception. The eventloop will close and cleanup the tcp connection
+            throw runtime_error(strerror(errno));
+          }
+        }
+
+        // Insert received data to readBuffer
+        readBuffer.insert(buffer, buffer + n);
+      }
+    }
 
   private:
     /**
      * Reads and parses the chunk size for the next chunk
      *
      * Returns true if the chunkSize was correctly read into nextChunkSize
+     *
      * Returns false if more data needs to be in the readBuffer
+     *
      * Throws an exception if the input is invalid encoded
      */
     bool processChunkSize() {
@@ -947,7 +1102,9 @@ namespace SimpleHTTP {
      * Reads and parses the chunk data
      *
      * Returns true if the chunk data was correctly processed into the rawReadBuffer
+     *
      * Returns false if more data needs to be in the readBuffer
+     *
      * Throws an exception if the input is invalid encoded
      */
     bool processChunkData() {
@@ -961,6 +1118,43 @@ namespace SimpleHTTP {
         readBuffer.cstrAfterCursor(),
         readBuffer.cstrAfterCursor()+nextChunkSize
       );
+
+      // Update readBuffer cursor
+      readBuffer.increment(nextChunkSize);
+
+      // Expect CRLF ('\r' & '\n') after chunk (defined in RFC 7230)
+      identifier = "";
+      // Read '\r'
+      identifier += readBuffer.next().value();
+      // Read '\n'
+      identifier += readBuffer.next().value();
+
+      // Check if CRLF is present
+      if (identifier!="\r\n") {
+        throw runtime_error("Expected CRLF after chunk");
+      }
+
+      // Erase chunk + chunkSize before cursor (+ 1 offset to also remove the current value)
+      readBuffer.eraseBeforeCursor(1);
+      
+      return true;
+    }
+
+    /**
+     * Parses and skips a chunk block of data
+     * (akin to processChunkData, but the data is discarded instead of written to rawReadBuffer)
+     *
+     * Returns true if the chunk data was correctly processed and skipped
+     *
+     * Returns false if more data needs to be in the readBuffer
+     *
+     * Throws an exception if the input is invalid encoded
+     */
+    bool skipChunkData() {
+      // Check if the readBuffer has enough data for nextChunkSize + CRLF
+      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
+        return false;
+      }
 
       // Update readBuffer cursor
       readBuffer.increment(nextChunkSize);
@@ -1131,6 +1325,24 @@ namespace SimpleHTTP {
     };
   }
 
+  /**
+   * Server Configuration Object
+   *
+   * Fine-tune the server settings here.
+   * If unfamiliar with an option, retain its default value.
+   */
+  struct ServerConfiguration {
+    // Size of the Send / Recv buffer in bytes
+    const int sockBufferSize = 8192;
+    // Size of waiting incomming connections before connections are refused
+    const int sockQueueSize = 128;
+    // Defines the maximum epoll events handled in one loop iteration
+    const int maxEventsPerLoop = 12;
+    // Defines the maximum size of the header. If exceeded, request will fail
+    const int maxHeaderSize = 8192;
+    // Connection timeout
+    const chrono::seconds connectionTimeout = chrono::seconds(120);
+  };
   
   /**
    * HTTP Server object bound to one bsd socket
@@ -1147,16 +1359,8 @@ namespace SimpleHTTP {
     struct sockaddr coreSockAddr;
     // Socket flags
     int sockFlags;
-    // Size of the Send / Recv buffer in bytes
-    const int sockBufferSize = 8192;
-    // Size of waiting incomming connections before connections are refused
-    const int sockQueueSize = 128;
-    // Defines the maximum epoll events handled in one loop iteration
-    const int maxEventsPerLoop = 12;
-    // Defines the maximum size of the header. If exceeded request will fail
-    const int maxHeaderSize = 8192;
-    // Connection timeout
-    const chrono::seconds connectionTimeout = chrono::seconds(3600);
+    // Server configuration
+    ServerConfiguration config;
 
     // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
     // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
@@ -1292,7 +1496,13 @@ namespace SimpleHTTP {
       }
       
       // Set socket recv buffer (should match a regular HTTP package for optimal performance)
-      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_RCVBUF, &sockBufferSize, sizeof(sockBufferSize));
+      res = setsockopt(
+        coreSocket.getfd(),
+        SOL_SOCKET,
+        SO_RCVBUF,
+        &config.sockBufferSize,
+        sizeof(config.sockBufferSize)
+      );
       if (res < 0) {
         throw runtime_error(
           format(
@@ -1302,7 +1512,13 @@ namespace SimpleHTTP {
         );
       }
       // Set socket send buffer (should match a regular HTTP package for optimal performance)
-      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_SNDBUF, &sockBufferSize, sizeof(sockBufferSize));
+      res = setsockopt(
+        coreSocket.getfd(),
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &config.sockBufferSize,
+        sizeof(config.sockBufferSize)
+      );
       if (res < 0) {
         throw runtime_error(
           format(
@@ -1353,16 +1569,58 @@ namespace SimpleHTTP {
 
     /**
      * Adds a route to the server
+     *
+     * Method parameter maps to the HTTP method
+     *
+     * Route parameter maps to the HTTP path
+     *
+     * Func defines a coroutine which is called on matching requests.
+     * The coroutine defined provides a Request, Body, and a Response object.
+     *
+     * Request / Response:
+     * Those objects can be used to analyze and manipulate the request / response.
+     *
+     * Body:
+     * The body object provides a read() and readAll() function; those functions can be used
+     * with co_await to read data from the HTTP body.
+     *
+     *
+     * If not all data from the body is read and the Connection header is set to "keep-alive",
+     * the body is drained after the request, blocking new incoming requests on this stream
+     * until the full body is read.
+     *
+     * To manually close the stream after the response (even if Connection is set to "keep-alive"),
+     * you can use co_return false;
+     *
+     * co_return true; indicates that the regular flow is continued
+     * (connection remains open after the body is drained)
+     *
+     *
+     * Func shall NOT perform any IO operation besides those provided by simplehttp.
+     * Performing another blocking IO operation will block the whole HTTP server, not just this function!
      */
     void Route(string method, string route, function<internal::Task<bool>(Request, Body, Response)> func) {
+      // Convert method tolower
+      transform(method.begin(), method.end(), method.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
+      // Convert route tolower
+      transform(route.begin(), route.end(), route.begin(),
+        [](unsigned char c){ return tolower(c); }
+      );
+
+      // Find route if existent
       auto routeIter = routeMap.find(route);
       if (routeIter != routeMap.end()) {
+        // If route does already exist, add the method to it
         routeIter->second[method] = func;
       } else {
+        // If route does not exist, create the route
         routeMap.emplace(
           route,
           unordered_map<string, function<internal::Task<void>(Request, Response)>>()
         );
+        // Add method to the route
         routeMap[route][method] = func;
       }
     }
@@ -1378,7 +1636,7 @@ namespace SimpleHTTP {
      */
     void Serve() {
       // Start listener on core socket
-      int res = listen(coreSocket.getfd(), sockQueueSize);
+      int res = listen(coreSocket.getfd(), config.sockQueueSize);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -1426,7 +1684,7 @@ namespace SimpleHTTP {
       
       // Buffer with list of connection events
       // This is used by the epoll instance to insert the events on every loop
-      struct epoll_event conEvents[maxEventsPerLoop];
+      struct epoll_event conEvents[config.maxEventsPerLoop];
 
       // Map holding connection state
       // Key is the filedescriptor number of the socket
@@ -1448,7 +1706,7 @@ namespace SimpleHTTP {
         
         // Wait for any epoll event (includes core socket and connections)
         // The -1 timeout means that it waits indefinitely until a event is reported
-        int n = epoll_wait(epollSocket.getfd(), conEvents, maxEventsPerLoop, -1);
+        int n = epoll_wait(epollSocket.getfd(), conEvents, config.maxEventsPerLoop, -1);
         if (n < 0) {
           throw runtime_error(
             format(
@@ -1541,7 +1799,7 @@ namespace SimpleHTTP {
             }
 
             // Capture current time and add it to the connectionTimeout
-            conStateIter->second.timeout = chrono::system_clock::now() + connectionTimeout;
+            conStateIter->second.timeout = chrono::system_clock::now() + config.connectionTimeout;
 
             // Handle current stage
             switch (conStateIter->second.stage) {
@@ -1567,7 +1825,7 @@ namespace SimpleHTTP {
               break;
             case internal::Stage::RES:
               // Only process if EPOLLOUT event is reported
-              if (conEvents[i].events & EPOLLIN) {
+              if (conEvents[i].events & EPOLLOUT) {
                 // Continue sending response
                 if (!ProcessResponse(conStateIter->second)) {
                   // If encountered critical error or explicit close request (Connection: close)
@@ -1576,7 +1834,20 @@ namespace SimpleHTTP {
                 }
               }
               break;
+            case internal::Stage::CLEANUP:
+              // Only process if EPOLLIN event is reported
+              if (conEvents[i].events & EPOLLIN) {
+                // Continue cleanup (draining the body)
+                if (!ProcessCleanup(conStateIter->second)) {
+                  // If encountered critical error or explicit close request (Connection: close)
+                  // close connection (erase from map)
+                  conStateMap.erase(conStateIter);
+                }
+              }
+              break;
             default:
+              // Other stages are not invoked by epoll events
+              // but through other stages
               break;
             }
           }
@@ -1612,8 +1883,8 @@ namespace SimpleHTTP {
     bool ProcessRequest(internal::ConnectionState &state) {
       while (1) {
         // We take the socket buffersize to read everything at once (if available)
-        char buffer[sockBufferSize+1];
-        int n = recv(state.fd.getfd(), buffer, sockBufferSize, 0);
+        char buffer[config.sockBufferSize+1];
+        int n = recv(state.fd.getfd(), buffer, config.sockBufferSize, 0);
         if (n < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Skip if no data is available to read
@@ -1635,7 +1906,7 @@ namespace SimpleHTTP {
           // Check if serialized part before cursor exceeds maxHeaderSize.
           // This check, performed post-serialization, ensures body parts in the buffer
           // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
-          if (state.reqBuffer.sizeBeforeCursor()>maxHeaderSize) {
+          if (state.reqBuffer.sizeBeforeCursor()>config.maxHeaderSize) {
             throw runtime_error("Header size exceeds defined maximum size");
           }
           // If request is not fully deserialized; continue fetching data
@@ -1695,13 +1966,13 @@ namespace SimpleHTTP {
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // ChunkedBody will interpret data chunked
           state.body = ChunkedBody(
-            &state.fd, sockBufferSize, std::move(state.reqBuffer)
+            &state.fd, config.sockBufferSize, std::move(state.reqBuffer)
           );
         else
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // FixedBody will interpret data with a fixed length
           state.body = FixedBody(
-            &state.fd, sockBufferSize, bodySize, std::move(state.reqBuffer)
+            &state.fd, config.sockBufferSize, bodySize, std::move(state.reqBuffer)
           );
           
         // Start function execution
@@ -1724,18 +1995,18 @@ namespace SimpleHTTP {
       string identifier = "";
       optional<char> c;
 
-      // If type is empty, parse it
-      if (request.getType().empty()) {
+      // If method is empty, parse it
+      if (request.getMethod().empty()) {
         while (1) {
           if (!(c = buffer.next()).has_value()) {
-            // Rollback buffer as not enough data is provided to parse the type
+            // Rollback buffer as not enough data is provided to parse the method
             buffer.rollback();
             return false;
           }
           // Read until space
           if (c.value()==' ') {
-            // Set type and exit loop
-            request.setType(identifier);
+            // Set method and exit loop
+            request.setMethod(identifier);
             // Commit buffer as the identifier was fully parsed
             buffer.commit();
             break;
@@ -1754,7 +2025,7 @@ namespace SimpleHTTP {
           }
           // Read until space
           if (c.value()==' ') {
-            // Set header and exit loop
+            // Set path and exit loop
             request.setPath(identifier);
             // Commit buffer as the identifier was fully parsed
             buffer.commit();
@@ -1776,7 +2047,7 @@ namespace SimpleHTTP {
           if (c.value()=='\r') continue;
           // Read until newline
           if (c.value()=='\n') {
-            // Set type and exit loop
+            // Set version and exit loop
             request.setVersion(identifier);
             // Commit buffer as the identifier was fully parsed
             buffer.commit();
@@ -1863,13 +2134,13 @@ namespace SimpleHTTP {
         return true;
       }
       // Find type / method on the route
-      auto handlerIter = routeIter->second.find(state.request.getType());
+      auto handlerIter = routeIter->second.find(state.request.getMethod());
       if (handlerIter != routeIter->second.end()) {
         state.response
           .setStatusCode(405)
           .setStatusReason("Method Not Allowed")
           .setContentType("text/plain")
-          .setBody("The method "+state.request.getType()+" is not allowed for the requested resource");
+          .setBody("The method "+state.request.getMethod()+" is not allowed for the requested resource");
         state.stage = internal::RES;
         return true;
       }
@@ -1897,8 +2168,13 @@ namespace SimpleHTTP {
           state.stage = internal::Stage::RES;
           return true;
         } else {
-          // Handle case if coroutine returned false;
-          return false;
+          // If false is returned, the TCP connection is closed after the response.
+          // This can be beneficial when a large unread body is provided by the client,
+          // avoiding the need to drain the body and potentially increasing performance.
+          // Set connection header to close, this will close the tcp socket
+          state.request.setHeader("connection", "close");
+          state.stage = internal::Stage::RES;
+          return true;
         }
       } else {
         // If no value was provided, the function blocks
@@ -1925,10 +2201,15 @@ namespace SimpleHTTP {
           // In order to do this, the stage remains FUNC_BODY and is processed in the next event loop
           return true;
         }
-      } catch (exception _) {
-        // Exception occured on underlying connection
-        // Exit and cleanup connection
-        return false;
+      } catch (exception err) {
+        // Exception occured on reading body
+        state.response
+          .setStatusCode(400)
+          .setStatusReason("Bad Request")
+          .setContentType("text/plain")
+          .setBody("Invalid body encoding. "+string(err.what()));
+        state.stage = internal::Stage::RES;
+        return true;
       }
     }
 
@@ -1963,16 +2244,14 @@ namespace SimpleHTTP {
         state.resBuffer.increment(n);
         // Check if all data is sent, if yes the operation is finished
         if (state.resBuffer.sizeAfterCursor() < 1) {
-          // If connection header is set to "close". Explicitly close the connection
-          if (state.request.getHeader("Connection")=="close") {
+          if (state.request.getHeader("connection")=="close") {
+            // If connection header is set to "close". Explicitly close the connection
             return false;
+          } else {
+            // If connection is set to keep-alive, drain the body (if not already done).
+            state.stage = internal::Stage::CLEANUP;
+            return ProcessCleanup(state);
           }
-          // Reset connection state by creating a new object and moving the fd
-          state = internal::ConnectionState{
-            .fd = std::move(state.fd),
-            .stage = internal::Stage::REQ
-          };
-          return true;
         }
       }
     }
@@ -2012,6 +2291,40 @@ namespace SimpleHTTP {
         "\r\n{}",
         response.getBody()
       );
+    }
+
+    /**
+     * Process cleanup of the connection if it is reused afterwards (keep-alive enabled)
+     *
+     * Returns false if the connection should be closed
+     */
+    bool ProcessCleanup(internal::ConnectionState &state) {
+      try {
+        // Continue draining body
+        // If draining the body overfetches data from the socket
+        // this data is stored to the overfetchBuffer
+        // and moved to the new ConnectionStates reqBuffer
+        auto overfetchBuffer = state.body.drainBody();
+        if (overfetchBuffer.has_value()) {
+          // If body is fully cleared,
+          // reset connection state by creating a new object and moving the fd
+          // The overfetched buffer is moved to the reqBuffer
+          state = internal::ConnectionState{
+            .fd = std::move(state.fd),
+            .stage = internal::Stage::REQ,
+            .reqBuffer = overfetchBuffer.value()
+          };
+          return true;
+        } else {
+          // If body is not fully cleared,
+          // keep connection setup to continue draining the body when more data is available
+          return true;
+        }
+      } catch (exception err) {
+        // Exception occured while draining body
+        // Close underlying connection
+        return false;
+      }
     }
   };
 }
