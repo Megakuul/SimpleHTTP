@@ -22,6 +22,7 @@
 
 #include <asm-generic/socket.h>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <coroutine>
@@ -29,7 +30,6 @@
 #include <ctime>
 #include <exception>
 #include <functional>
-#include <iterator>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -159,6 +159,45 @@ namespace SimpleHTTP {
      */
     class Buffer {
     public:
+      Buffer();
+      
+      /**
+       * Initialize buffer, move other buffer data and reset cursor
+       */
+      Buffer(Buffer&& other) noexcept : buffer(std::move(other.buffer)),
+                                        headCursor(0),
+                                        rollbackCursor(0) {}
+      /**
+       * Initialize buffer, copy other buffer data and reset cursor
+       */
+      Buffer(const Buffer& other) noexcept : buffer(other.buffer),
+                                             headCursor(0),
+                                             rollbackCursor(0) {}
+
+      /**
+       * Assignes new buffer to object and resets cursors
+       */
+      Buffer& operator=(Buffer&& other) noexcept {
+        if (this!=&other) {
+          buffer = std::move(other.buffer);
+          headCursor = 0;
+          rollbackCursor = 0;
+        }
+        return *this;
+      }
+
+      /**
+       * Assignes new buffer to object and resets cursors
+       */
+      Buffer& operator=(const Buffer& other) noexcept {
+        if (this!=&other) {
+          buffer = other.buffer;
+          headCursor = 0;
+          rollbackCursor = 0;
+        }
+        return *this;
+      }
+      
       /**
        * Assignes new string to buffer and resets cursors
        */
@@ -199,6 +238,7 @@ namespace SimpleHTTP {
         return *this;
       }
 
+      
       /**
        * Get char at head cursor position
        */
@@ -277,9 +317,28 @@ namespace SimpleHTTP {
       bool empty() {
         return buffer.empty();
       }
+
+      /**
+       * Insert a array of unsigned chars to the end of the buffer
+       */
+      Buffer& insert(unsigned char* begin, unsigned char* end) {
+        buffer.insert(buffer.end(), begin, end);
+        return *this;
+      }
+
+      /**
+       * Insert a array of unsigned chars to the end of the buffer
+       */
+      Buffer& insert(const char* begin, const char* end) {
+        buffer.insert(buffer.end(), begin, end);
+        return *this;
+      }
       
       /**
        * Get reference to underlying cstring from index 0
+       *
+       * Note that regular C-style operations will not work as expected if the underlying data
+       * is not strictly string data (if it can contain \0)
        */
       const char* cstr() {
         return buffer.c_str();
@@ -308,27 +367,89 @@ namespace SimpleHTTP {
 
       /**
        * Get reference to underlying cstring from the head cursor
+       *
+       * Note that regular C-style operations will not work as expected if the underlying data
+       * is not strictly string data (if it can contain \0)
        */
       const char* cstrAfterCursor() {
         return &buffer[headCursor];
       }
 
       /**
-       * Get copy of the underlying string from the head cursor
+       * Get copy of the underlying string from the head cursor (including head cursor)
        */
       string strAfterCursor() {
         return string(buffer.begin()+headCursor, buffer.end());
       }
 
       /**
-       * Get copy of the underlying data from the head cursor
+       * Get copy of the underlying string from index 0 to head cursor (head cursor not included)
+       */
+      string strBeforeCursor() {
+        return string(buffer.begin(), buffer.begin()+headCursor);
+      }
+
+      /**
+       * Get copy of the underlying data from the head cursor (including head cursor)
        */
       vector<unsigned char> vecAfterCursor() {
         return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
-      }      
+      }
 
       /**
-       * Returns the size of the buffer from the head cursor
+       * Get copy of the underlying data from index 0 to head cursor (head cursor not included)
+       */
+      vector<unsigned char> vecBeforeCursor() {
+        return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor);
+      }
+
+      /**
+       * Erases the buffer from index 0 to head cursor (head cursor not included)
+       *
+       * This will also move the head cursor to 0 and commit this change
+       * (after the operation the cursor is essentially on the same element as before)
+       *
+       * Incrementing the offset will make it erase more data of the right side of the cursor
+       */
+      Buffer& eraseBeforeCursor(uint offset=0) {
+        // Create the index, up to which the data will be erased
+        int index = headCursor+offset;
+        // Check if in bounds
+        if (index>buffer.size())
+          // If size exceeded, cap index to buffer size
+          index = buffer.size();
+        // Erase data
+        buffer.erase(buffer.begin(), buffer.begin()+index);
+        // Set and commit cursor to 0
+        set(0);
+        commit();
+        return *this;
+      }
+
+      /**
+       * Erases the buffer from head cursor (including head cursor)
+       *
+       * This will also move the head cursor one position back and commit this change
+       * (after the operation the cursor is at the last valid element in the buffer)
+       *
+       * Incrementing the offset will make it erase more data of the left side of the cursor
+       */
+      Buffer& eraseAfterCursor(uint offset=0) {
+        // Create the index, after which the data will be erased
+        int index = headCursor-offset;
+        // Check if in bounds
+        if (index>0)
+          // If size exceeded, cap index to 0
+          index = 0;
+        buffer.erase(buffer.begin()+index, buffer.end());
+        // Set cursor to last element
+        set(buffer.size()-1);
+        commit();
+        return *this;
+      }
+      
+      /**
+       * Returns the size of the buffer from the head cursor (including head cursor)
        */
       int sizeAfterCursor() {
         return buffer.size() - headCursor;
@@ -576,7 +697,7 @@ namespace SimpleHTTP {
       internal::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      vector<unsigned char> initBuffer
+      internal::Buffer initBuffer
     ) :
       socket(socket),
       socketBufferSize(socketBufferSize),
@@ -626,7 +747,7 @@ namespace SimpleHTTP {
     int bodySize;
     // Temporary buffer holding the received data
     // Data which is read from the user is erased from this
-    vector<unsigned char> readBuffer;
+    internal::Buffer readBuffer;
     // Current pending read request
     optional<ReadRequest> request;
   };
@@ -637,7 +758,7 @@ namespace SimpleHTTP {
       internal::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      vector<unsigned char> initBuffer
+      internal::Buffer initBuffer
     ) : Body(socket, socketBufferSize, bodySize, initBuffer) {}
     
     /**
@@ -669,10 +790,12 @@ namespace SimpleHTTP {
         }
         // Check if readBuffer contains enough data or if the full body was read
         if (readBuffer.size() >= req.size) {
-          // Copy the requested size into a temporary slice
-          *req.outBuffer = vector<unsigned char>(readBuffer.begin(), readBuffer.begin()+req.size);
+          // Set cursor to requested index + 1 (requested size)
+          readBuffer.set(req.size);
+          // Copy the requested data (0-requested index) to outBuffer
+          *req.outBuffer = readBuffer.vecBeforeCursor();
           // Erase the removed data from the buffer
-          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+req.size);
+          readBuffer.eraseBeforeCursor();
           // Decrement body size
           bodySize -= req.size;
           return true;
@@ -693,18 +816,33 @@ namespace SimpleHTTP {
           }
         }
         // Insert received data to readBuffer
-        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
+        readBuffer.insert(buffer, buffer+n);
       }
     }
   };
 
   
   class ChunkedBody : public Body {
+  private:
+    // Buffer holding the decoded data
+    internal::Buffer rawReadBuffer;
+    // Identifier buffer for the parser
+    string identifier;
+    // Character buffer for the parser
+    optional<char> c;
+    // Determines if currently chunk data is read or if the size is read
+    bool readChunkState = false;
+    // Determines the size of the next chunk
+    int nextChunkSize = 0;
+    // Defines the maximum length of the hexadecimal chunkSize number
+    // If the chunkSize number is larger the encoding is considered invalid
+    const int maxChunkSizeLength = 5;
+    
   public:
     ChunkedBody(
       internal::FileDescriptor* socket,
       int socketBufferSize,
-      vector<unsigned char> initBuffer
+      internal::Buffer initBuffer
     ) : Body(socket, socketBufferSize, 0, initBuffer) {}
     
     /**
@@ -724,23 +862,27 @@ namespace SimpleHTTP {
       if (!request.has_value()) return true;
       ReadRequest req = request.value();
       
-      // Cap size to body size if size is larger then body
-      req.size = req.size>bodySize ? bodySize : req.size;
-      
       while (1) {
-        // If bodySize is <= 0 an empty vector is returned
-        if (bodySize<=0) {
-          *req.outBuffer = {};
-          return true;
+        // Process data from buffer
+        while(1) {
+          if (readChunkState) {
+            if (!processChunkData()) {
+              break;
+            }
+          } else {
+            if (!processChunkSize()) {
+              break;
+            }
+          }
         }
         // Check if readBuffer contains enough data or if the full body was read
-        if (readBuffer.size() >= req.size) {
-          // Copy the requested size into a temporary slice
-          *req.outBuffer = vector<unsigned char>(readBuffer.begin(), readBuffer.begin()+req.size);
+        if (rawReadBuffer.size() >= req.size) {
+          // Set cursor to requested index + 1 (requested size)
+          rawReadBuffer.set(req.size);
+          // Copy the requested data (0-requested index) to outBuffer
+          *req.outBuffer = rawReadBuffer.vecBeforeCursor();
           // Erase the removed data from the buffer
-          readBuffer.erase(readBuffer.begin(), readBuffer.begin()+req.size);
-          // Decrement body size
-          bodySize -= req.size;
+          rawReadBuffer.eraseBeforeCursor();
           return true;
         }
 
@@ -758,9 +900,87 @@ namespace SimpleHTTP {
             throw runtime_error(strerror(errno));
           }
         }
+
         // Insert received data to readBuffer
-        readBuffer.insert(readBuffer.end(), buffer, buffer + n);
+        readBuffer.insert(buffer, buffer + n);
+      }      
+    }
+
+
+  private:
+    /**
+     * Reads and parses the chunk size for the next chunk
+     *
+     * Returns true if the chunkSize was correctly read into nextChunkSize
+     * Returns false if more data needs to be in the readBuffer
+     * Throws an exception if the input is invalid encoded
+     */
+    bool processChunkSize() {
+      // Read size for next chunk
+      // There is a max size for the chunk to prevent invalid or malicious
+      // encoding to starve the performance of the server
+      for (int i=0;i<maxChunkSizeLength;i++) {
+        if (!(c = readBuffer.next()).has_value()) {
+          // Rollback buffer as not enough data is provided to parse the type
+          readBuffer.rollback();
+          return false;
+        }
+        // Skip carriage return as termination is based on newline
+        if (c.value()=='\r') continue;
+        // If newline is read, this indicates the end of the size
+        if (c.value()=='\n') {
+          // Convert identifier into string with stoi on base 16 (hex)
+          // If the identifier cannot be converted stoi throws an error
+          // this error will be thrown to the caller of processRequest()
+          // which is fine because if the size is not convertable, it is considered invalid encoding
+          nextChunkSize = stoi(identifier, nullptr, 16);
+          readChunkState = true;
+          readBuffer.commit();
+          return true;
+        }
+        identifier+=c.value();
       }
+      return true;
+    }
+    
+    /**
+     * Reads and parses the chunk data
+     *
+     * Returns true if the chunk data was correctly processed into the rawReadBuffer
+     * Returns false if more data needs to be in the readBuffer
+     * Throws an exception if the input is invalid encoded
+     */
+    bool processChunkData() {
+      // Check if the readBuffer has enough data for nextChunkSize + CRLF
+      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
+        return false;
+      }
+
+      // Copy data from readBuffer directly to rawReadBuffer
+      rawReadBuffer.insert(
+        readBuffer.cstrAfterCursor(),
+        readBuffer.cstrAfterCursor()+nextChunkSize
+      );
+
+      // Update readBuffer cursor
+      readBuffer.increment(nextChunkSize);
+
+      // Expect CRLF ('\r' & '\n') after chunk (defined in RFC 7230)
+      identifier = "";
+      // Read '\r'
+      identifier += readBuffer.next().value();
+      // Read '\n'
+      identifier += readBuffer.next().value();
+
+      // Check if CRLF is present
+      if (identifier!="\r\n") {
+        throw runtime_error("Expected CRLF after chunk");
+      }
+
+      // Erase chunk + chunkSize before cursor (+ 1 offset to also remove the current value)
+      readBuffer.eraseBeforeCursor(1);
+      
+      return true;
     }
   };
 
@@ -906,6 +1126,8 @@ namespace SimpleHTTP {
       Body body;
       // Response object
       Response response;
+      // Timeout when the connection is killed
+      chrono::system_clock::time_point timeout;
     };
   }
 
@@ -933,6 +1155,8 @@ namespace SimpleHTTP {
     const int maxEventsPerLoop = 12;
     // Defines the maximum size of the header. If exceeded request will fail
     const int maxHeaderSize = 8192;
+    // Connection timeout
+    const chrono::seconds connectionTimeout = chrono::seconds(3600);
 
     // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
     // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
@@ -1213,8 +1437,15 @@ namespace SimpleHTTP {
       // all sockets are closed automatically due to the RAII compatible FileDescriptor in the ConnectionState
       unordered_map<int, internal::ConnectionState> conStateMap;
       
-      // Start main loop
+      // Start main event loop
       while (1) {
+        // Capture current time
+        auto now = chrono::system_clock::now();
+        // Erase all connections where timeout is reached
+        for (auto &con : conStateMap) {
+          if (con.second.timeout<now) conStateMap.erase(con.first);
+        }
+        
         // Wait for any epoll event (includes core socket and connections)
         // The -1 timeout means that it waits indefinitely until a event is reported
         int n = epoll_wait(epollSocket.getfd(), conEvents, maxEventsPerLoop, -1);
@@ -1308,6 +1539,9 @@ namespace SimpleHTTP {
               conStateMap.erase(conStateIter);
               continue;
             }
+
+            // Capture current time and add it to the connectionTimeout
+            conStateIter->second.timeout = chrono::system_clock::now() + connectionTimeout;
 
             // Handle current stage
             switch (conStateIter->second.stage) {
@@ -1450,21 +1684,26 @@ namespace SimpleHTTP {
           bodySize = contentLength.value();
         }
 
+        // Erase processed buffer
+        // Offset is set to 1 to remove the current token (which is most likely '\n')
+        state.reqBuffer.eraseBeforeCursor(1);
+
+        // State reqBuffer is moved into body, as we won't use the buffer anymore,
+        // the move will omit copying the underlying data (the body)
+        
         if (isChunked)
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // ChunkedBody will interpret data chunked
           state.body = ChunkedBody(
-            &state.fd, sockBufferSize, state.reqBuffer.vecAfterCursor()
+            &state.fd, sockBufferSize, std::move(state.reqBuffer)
           );
         else
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // FixedBody will interpret data with a fixed length
           state.body = FixedBody(
-            &state.fd, sockBufferSize, bodySize, state.reqBuffer.vecAfterCursor()
+            &state.fd, sockBufferSize, bodySize, std::move(state.reqBuffer)
           );
           
-        // Reset req buffer
-        state.reqBuffer = "";
         // Start function execution
         return InitializeFunction(state);
       }
