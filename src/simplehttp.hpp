@@ -160,7 +160,7 @@ namespace SimpleHTTP {
      */
     class Buffer {
     public:
-      Buffer();
+      Buffer() {};
       
       /**
        * Initialize buffer, move other buffer data and reset cursor
@@ -255,7 +255,7 @@ namespace SimpleHTTP {
        */
       optional<char> next() {
         int nextCursor = headCursor+1;
-        if (nextCursor<buffer.size())
+        if (nextCursor<int(buffer.size()))
           return buffer[headCursor=nextCursor];
         else
           return nullopt;
@@ -292,7 +292,7 @@ namespace SimpleHTTP {
        * and the cursor is not changed
        */
       bool set(int newpos) {
-        if (newpos<buffer.size() && newpos>=0) {
+        if (newpos<int(buffer.size()) && newpos>=0) {
           headCursor = newpos;
           return true;
         } else
@@ -305,7 +305,7 @@ namespace SimpleHTTP {
        */
       bool increment(int update) {
         int nextCursor = headCursor+update;
-        if (nextCursor<buffer.size() && nextCursor>=0) {
+        if (nextCursor<int(buffer.size()) && nextCursor>=0) {
           headCursor = nextCursor;
           return true;
         } else
@@ -416,7 +416,7 @@ namespace SimpleHTTP {
         // Create the index, up to which the data will be erased
         int index = headCursor+offset;
         // Check if in bounds
-        if (index>buffer.size())
+        if (index>int(buffer.size()))
           // If size exceeded, cap index to buffer size
           index = buffer.size();
         // Erase data
@@ -468,109 +468,110 @@ namespace SimpleHTTP {
       int headCursor = 0;
       int rollbackCursor = 0;
     };
+  }
 
-    /**
-     * Generic handle wrapper for coroutine
-     *
-     * Used as return type from coroutines
-     *
-     * Makes sure the underlying coroutine_handle is only attached to one Task
-     */ 
-    template <typename T>
-    class Task {
-    public:
-      // Define promise type (predefined coroutine struct)
-      struct promise_type {
-        // Generic return value
-        T value;
-        // Exception ptr
-        exception_ptr exception = nullptr;
-        // Predefined coroutine function called when creating the coroutine
-        Task get_return_object() {
-          return Task{coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        // Predefined function called when coroutine is initialized
-        suspend_always initial_suspend() { return {}; }
-        // Predefined function called before coroutine is destroyed (value is returned)
-        suspend_never final_suspend() noexcept { return {}; } // Don't suspend, directly destroy coroutine
-        // Predefined function called when returning the value (co_return)
-        void return_value(T v) { value = v; } // Store return value in promise frame before handle is destroyed
-        // Predefined function called when exception is thrown
-        void unhandled_exception() { exception = current_exception(); } // Store exception to handle it later
-      };
+  
+  /**
+   * Generic handle wrapper for coroutine
+   *
+   * Used as return type from coroutines
+   *
+   * Ensures the underlying coroutine_handle is only attached to one Task
+   */ 
+  template <typename T>
+  class Task {
+  public:
+    // Define promise type (predefined coroutine struct)
+    struct promise_type {
+      // Generic return value
+      T value;
+      // Exception ptr
+      exception_ptr exception = nullptr;
+      // Predefined coroutine function called when creating the coroutine
+      Task get_return_object() {
+        return Task{coroutine_handle<promise_type>::from_promise(*this)};
+      }
+      // Predefined function called when coroutine is initialized
+      suspend_always initial_suspend() { return {}; }
+      // Predefined function called before coroutine is destroyed (value is returned)
+      suspend_never final_suspend() noexcept { return {}; } // Don't suspend, directly destroy coroutine
+      // Predefined function called when returning the value (co_return)
+      void return_value(T v) { value = v; } // Store return value in promise frame before handle is destroyed
+      // Predefined function called when exception is thrown
+      void unhandled_exception() { exception = current_exception(); } // Store exception to handle it later
+    };
 
-      // Default constructor sets coroutine to nullptr
-      Task() : coro(nullptr) {}
-      // Constructor to initialize handle
-      Task(coroutine_handle<promise_type> h) : coro(h) {}
-      // Destructor to cleanup handle
-      ~Task() { if (coro) coro.destroy(); }
+    // Default constructor sets coroutine to nullptr
+    Task() : coro(nullptr) {}
+    // Constructor to initialize handle
+    Task(coroutine_handle<promise_type> h) : coro(h) {}
+    // Destructor to cleanup handle
+    ~Task() { if (coro) coro.destroy(); }
 
-      // Delete copy constructor
-      Task(const Task&) = delete;
+    // Delete copy constructor
+    Task(const Task&) = delete;
 
-      // Move constructor explicitly sets the other coroutine to nullptr
-      // To prevent double destruction
-      Task(Task&& other) noexcept : coro(other.coro) {
+    // Move constructor explicitly sets the other coroutine to nullptr
+    // To prevent double destruction
+    Task(Task&& other) noexcept : coro(other.coro) {
+      other.coro = nullptr;
+    }
+      
+    // Delete copy assignment
+    Task& operator=(const Task&) = delete;
+
+    // Move assignment explicitly sets the other coroutine to nullptr
+    // and destroys the local coroutine to prevent double destruction
+    Task& operator=(Task&& other) noexcept {
+      if (&other!=this) {
+        if (coro) coro.destroy();
+        coro = other.coro;
         other.coro = nullptr;
       }
-      
-      // Delete copy assignment
-      Task& operator=(const Task&) = delete;
+      return *this;
+    }
 
-      // Move assignment explicitly sets the other coroutine to nullptr
-      // and destroys the local coroutine to prevent double destruction
-      Task& operator=(Task&& other) noexcept {
-        if (&other!=this) {
-          if (coro) coro.destroy();
-          coro = other.coro;
-          other.coro = nullptr;
-        }
-        return *this;
+    /**
+     * Checks if coroutine is done/destroyed
+     */
+    bool done() {
+      return !coro || coro.done();
+    }
+
+    /**
+     * Resumes execution of the coroutine
+     *
+     * If the coroutine is suspended, it will return nullopt
+     * otherwise the return value is returned
+     *
+     * Throws a logic_error if coroutine is accessed after its completed
+     * Rethrows exception if the coroutine completed with an uncaught exception
+     */
+    optional<T> resume() {
+      if (!coro || coro.done()) {
+        // Resuming coroutine which is done() is undefined
+        throw logic_error("Attempt to resume a completed coroutine");
       }
+      // Resume coroutine
+      coro.resume();
+      if (coro.done()) {
+        // If coroutine returned, handle return / exception
 
-      /**
-       * Checks if coroutine is done/destroyed
-       */
-      bool done() {
-        return !coro || coro.done();
-      }
-
-      /**
-       * Resumes execution of the coroutine
-       *
-       * If the coroutine is suspended, it will return nullopt
-       * otherwise the return value is returned
-       *
-       * Throws a logic_error if coroutine is accessed after its completed
-       * Rethrows exception if the coroutine completed with an uncaught exception
-       */
-      optional<T> resume() {
-        if (!coro || coro.done()) {
-          // Resuming coroutine which is done() is undefined
-          throw logic_error("Attempt to resume a completed coroutine");
+        // Rethrow exception on exception
+        if (coro.promise().exception) {
+          rethrow_exception(coro.promise().exception);
         }
-        // Resume coroutine
-        coro.resume();
-        if (coro.done()) {
-          // If coroutine returned, handle return / exception
-
-          // Rethrow exception on exception
-          if (coro.promise().exception) {
-            rethrow_exception(coro.promise().exception);
-          }
-          // Return value
-          return coro.promise().value;
-        } else {
-          // Else return nullopt
-          return nullopt;
-        }
+        // Return value
+        return coro.promise().value;
+      } else {
+        // Else return nullopt
+        return nullopt;
       }
-    private:
-      // Main coroutine handle
-      coroutine_handle<promise_type> coro;
-    };
-  }
+    }
+  private:
+    // Main coroutine handle
+    coroutine_handle<promise_type> coro;
+  };
 
   /**
    * Http Request object retrieved upon successful connection
@@ -701,22 +702,17 @@ namespace SimpleHTTP {
   };
 
 
-  
+
+  /**
+   * Abstract body object to dynamically read the HTTP body
+   *
+   * Provides functions to create a awaitable read request (read() / readAll())
+   *
+   * Provides derived objects to handle data transfer in a non-blocking event loop
+   */
   class Body {
   public:
-    Body();
-    
-    Body(
-      internal::FileDescriptor* socket,
-      int socketBufferSize,
-      int bodySize,
-      internal::Buffer initBuffer
-    ) :
-      socket(socket),
-      socketBufferSize(socketBufferSize),
-      bodySize(bodySize),
-      readBuffer(initBuffer)
-    {}
+    virtual ~Body() {};
 
     /**
      * Awaitable structure to schedule read requests
@@ -735,7 +731,7 @@ namespace SimpleHTTP {
       }
 
       // When resuming, reset the request and return the outBuffer
-      vector<unsigned char> await_resume() const noexcept {
+      vector<unsigned char> await_resume() const {
         body.request = nullopt;
         return outBuffer;
       }
@@ -776,18 +772,31 @@ namespace SimpleHTTP {
      *
      * Don't use this function inside your coroutine.
      */
-    virtual bool processRequest();
+    virtual bool processRequest() = 0;
 
     /**
      * Internal function to drain the body in the event loop
      *
      * Don't use this function inside your coroutine.
      */
-    virtual optional<internal::Buffer> drainBody();
+    virtual optional<internal::Buffer> drainBody() = 0;
 
     
     
   protected:
+    Body(
+      internal::FileDescriptor* socket,
+      int socketBufferSize,
+      int bodySize,
+      internal::Buffer initBuffer
+    ) :
+      socket(socket),
+      socketBufferSize(socketBufferSize),
+      bodySize(bodySize),
+      readBuffer(initBuffer)
+    {}
+
+    
     /**
      * Datastructure defining a request to read a certain amount of data from the body
      */
@@ -809,6 +818,12 @@ namespace SimpleHTTP {
     optional<ReadRequest> request;
   };
 
+
+  /**
+   * Inherited object to read an HTTP body with a fixed size
+   *
+   * Overrides functions to handle fixed HTTP bodys (Content-Length: xy)
+   */
   class FixedBody : public Body {
   public:
     FixedBody(
@@ -919,23 +934,13 @@ namespace SimpleHTTP {
     }
   };
 
-  
+
+  /**
+   * Inherited object to read an HTTP body with a dynamic size
+   *
+   * Overrides functions to handle chunked HTTP bodys (Transfer-Encoding: chunked)
+   */
   class ChunkedBody : public Body {
-  private:
-    // Buffer holding the decoded data
-    internal::Buffer rawReadBuffer;
-    // Identifier buffer for the parser
-    string identifier;
-    // Character buffer for the parser
-    optional<char> c;
-    // Determines if currently chunk data is read or if the size is read
-    bool readChunkState = false;
-    // Determines the size of the next chunk
-    int nextChunkSize = 0;
-    // Defines the maximum length of the hexadecimal chunkSize number
-    // If the chunkSize number is larger the encoding is considered invalid
-    const int maxChunkSizeLength = 5;
-    
   public:
     ChunkedBody(
       internal::FileDescriptor* socket,
@@ -1061,6 +1066,20 @@ namespace SimpleHTTP {
     }
 
   private:
+    // Buffer holding the decoded data
+    internal::Buffer rawReadBuffer;
+    // Identifier buffer for the parser
+    string identifier;
+    // Character buffer for the parser
+    optional<char> c;
+    // Determines if currently chunk data is read or if the size is read
+    bool readChunkState = false;
+    // Determines the size of the next chunk
+    int nextChunkSize = 0;
+    // Defines the maximum length of the hexadecimal chunkSize number
+    // If the chunkSize number is larger the encoding is considered invalid
+    const int maxChunkSizeLength = 5;
+    
     /**
      * Reads and parses the chunk size for the next chunk
      *
@@ -1071,6 +1090,7 @@ namespace SimpleHTTP {
      * Throws an exception if the input is invalid encoded
      */
     bool processChunkSize() {
+      identifier="";
       // Read size for next chunk
       // There is a max size for the chunk to prevent invalid or malicious
       // encoding to starve the performance of the server
@@ -1306,22 +1326,24 @@ namespace SimpleHTTP {
      * ConnectionState holds the state of a http connection
      */
     struct ConnectionState {
+      // Socket descriptor
       FileDescriptor fd;
+      // Connection stage
       Stage stage;
       // Request buffer
       Buffer reqBuffer;
       // Response buffer
       Buffer resBuffer;
-      // Request object
-      Request request;
+      // Request object (defaulted to empty Response object)
+      unique_ptr<Request> request = make_unique<Request>();
+      // Body object (abstract, so default initialized to nullptr)
+      unique_ptr<Body> body = nullptr;
+      // Response object (defaulted to empty Response object)
+      unique_ptr<Response> response = make_unique<Response>();
       // Coroutine (function) frame
       Task<bool> funcHandle;
-      // Body object
-      Body body;
-      // Response object
-      Response response;
       // Timeout when the connection is killed
-      chrono::system_clock::time_point timeout;
+      chrono::system_clock::time_point expirationTime;
     };
   }
 
@@ -1332,16 +1354,26 @@ namespace SimpleHTTP {
    * If unfamiliar with an option, retain its default value.
    */
   struct ServerConfiguration {
-    // Size of the Send / Recv buffer in bytes
-    const int sockBufferSize = 8192;
-    // Size of waiting incomming connections before connections are refused
-    const int sockQueueSize = 128;
-    // Defines the maximum epoll events handled in one loop iteration
-    const int maxEventsPerLoop = 12;
-    // Defines the maximum size of the header. If exceeded, request will fail
-    const int maxHeaderSize = 8192;
-    // Connection timeout
-    const chrono::seconds connectionTimeout = chrono::seconds(120);
+    /**
+     * Size of the Send / Recv buffer in bytes
+     */
+    int sockBufferSize = 8192;
+    /**
+     * Size of waiting incomming connections before connections are refused
+     */
+    int sockQueueSize = 16;
+    /**
+     * Defines the maximum epoll events handled in one loop iteration
+     */
+    int maxEventsPerLoop = 12;
+    /**
+     * Defines the maximum size of the header. If exceeded, request will fail
+     */
+    int maxHeaderSize = 8192;
+    /**
+     * Connection timeout. If exceeded without any interaction, the connection is closed
+     */
+    chrono::seconds connectionTimeout = chrono::seconds(120);
   };
   
   /**
@@ -1351,29 +1383,14 @@ namespace SimpleHTTP {
    *
    * Exceptions: runtime_error, logical_error, filesystem::filesystem_error
    */
-  class Server {
-  private:
-    // Core bsd socket
-    internal::FileDescriptor coreSocket;
-    // Socket addr
-    struct sockaddr coreSockAddr;
-    // Socket flags
-    int sockFlags;
-    // Server configuration
-    ServerConfiguration config;
-
-    // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
-    // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
-    // with their respective handler functions.
-    unordered_map<string, unordered_map<string, function<internal::Task<bool>(Request, Body, Response)>>> routeMap;
-    
+  class Server {    
   public:
     Server() = delete;
 
     /**
      * Launch Server using unix socket
      */
-    Server(string unixSockPath) {
+    Server(string unixSockPath, ServerConfiguration config=ServerConfiguration{}) : config(config) {
       fs::create_directories(fs::path(unixSockPath).parent_path());
       // Clean up socket, errors are ignored, if the socket cannot be cleaned up, it will fail at bind() which is fine
       unlink(unixSockPath.c_str());
@@ -1443,7 +1460,7 @@ namespace SimpleHTTP {
      * Multiple instances of this server can be launched in parallel to increase performance.
      * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
      */
-    Server(string ipAddr, u_int16_t port) {
+    Server(string ipAddr, u_int16_t port, ServerConfiguration config=ServerConfiguration{}) : config(config) {
       // Create sockaddr_in for convenient option setting
       struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&coreSockAddr;
       // Clean inSockAddr, 'cause maybe some weird libs
@@ -1599,7 +1616,7 @@ namespace SimpleHTTP {
      * Func shall NOT perform any IO operation besides those provided by simplehttp.
      * Performing another blocking IO operation will block the whole HTTP server, not just this function!
      */
-    void Route(string method, string route, function<internal::Task<bool>(Request, Body, Response)> func) {
+    void Route(string method, string route, function<Task<bool>(Request&, Body&, Response&)> func) {
       // Convert method tolower
       transform(method.begin(), method.end(), method.begin(),
         [](unsigned char c){ return tolower(c); }
@@ -1609,20 +1626,8 @@ namespace SimpleHTTP {
         [](unsigned char c){ return tolower(c); }
       );
 
-      // Find route if existent
-      auto routeIter = routeMap.find(route);
-      if (routeIter != routeMap.end()) {
-        // If route does already exist, add the method to it
-        routeIter->second[method] = func;
-      } else {
-        // If route does not exist, create the route
-        routeMap.emplace(
-          route,
-          unordered_map<string, function<internal::Task<void>(Request, Response)>>()
-        );
-        // Add method to the route
-        routeMap[route][method] = func;
-      }
+      // Add method to the route
+      routeMap[route][method] = func;
     }
 
     /**
@@ -1701,7 +1706,7 @@ namespace SimpleHTTP {
         auto now = chrono::system_clock::now();
         // Erase all connections where timeout is reached
         for (auto &con : conStateMap) {
-          if (con.second.timeout<now) conStateMap.erase(con.first);
+          if (con.second.expirationTime<now) conStateMap.erase(con.first);
         }
         
         // Wait for any epoll event (includes core socket and connections)
@@ -1717,8 +1722,9 @@ namespace SimpleHTTP {
         }
         // Handle events
         for (int i = 0; i < n; i++) {
-          // If the event is from the core socket
           if (conEvents[i].data.fd == coreSocket.getfd()) {
+            // If the event is from the core socket
+            
             // Check if error occured, if yes fetch it and return
             // For simplicity reasons there is currently no http 500 response here
             // instead sockets are closed leading to hangup signal on the client
@@ -1726,7 +1732,7 @@ namespace SimpleHTTP {
               int err = 0;
               socklen_t errlen = sizeof(err);
               // Read error from sockopt
-              res = getsockopt(conEvents[i].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
+              int res = getsockopt(conEvents[i].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
               // If getsockopt failed, return unknown error
               if (res < 0) {
                 throw runtime_error(
@@ -1745,42 +1751,28 @@ namespace SimpleHTTP {
                 );
               }
             }
-
+            
             // Check if socket hang up (happens if e.g. fd is closed)
             // Socket hang up is expected and therefore the loop is closed without errors
             if (conEvents[i].events & EPOLLHUP) {
               return;
             }
 
-            // Prepare accept() attributes
-            struct sockaddr conSockAddr = coreSockAddr;
-            socklen_t conSockLen = sizeof(conSockAddr);
-            // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
-            // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
-            // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
-            internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
-            if (conSocket.getfd() > 0) {
-              // Copy options from base event
-              struct epoll_event conEvent = conBaseEvent;
-              // Add custom fd to identify the connection
-              conEvent.data.fd = conSocket.getfd();
-              // Add connection to list of interest on epoll instance
-              res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
-              if (res == 0) {
-                // Move the socket to the conStateMap
-                // Local conSocket object is explicitly marked as rvalue so that it is moved,
-                // otherwise it would be cleaned up immediately
-                int conSockfd = conSocket.getfd(); // Copied because conSocket is moved before map[] overloader
-                conStateMap[conSockfd] = internal::ConnectionState{
-                  .fd = std::move(conSocket),
-                  .stage = internal::Stage::REQ
-                };
-              }
+            // Initialize connection
+            // If connection was not established correctly, it is skipped
+            auto conState = InitializeConnection(epollSocket, conEvents[i], conBaseEvent);
+            if (conState.has_value()) {
+              // Copied because conSocket is moved before map[] overloader
+              int conSockfd = conState.value().fd.getfd();
+              // Move the state to the conStateMap
+              // Local conState object is explicitly marked as rvalue so that it is moved,
+              // otherwise the contained FileDescriptor would be cleaned up immediately
+              conStateMap[conSockfd] = std::move(conState.value());
             }
+          }
+          else {
+            // If the event is from a connection
             
-            
-          // If the event is from a connection
-          } else {
             // Find ConnectionState object
             auto conStateIter = conStateMap.find(conEvents[i].data.fd);
             if (conStateIter == conStateMap.end()) {
@@ -1789,67 +1781,11 @@ namespace SimpleHTTP {
               epoll_ctl(epollSocket.getfd(), EPOLL_CTL_DEL, conEvents[i].data.fd, nullptr);
               continue;
             }
-
-            // Check if underlying connection failed or hangup
-            if (conEvents[i].events & EPOLLERR || conEvents[i].events & EPOLLHUP) {
+            // Handle connection, if false is returned, connection is cleaned up
+            if (!HandleConnection(conEvents[i], conStateIter->second)) {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
-              // At the moment I do not see sufficient reason to handle error further
               conStateMap.erase(conStateIter);
-              continue;
-            }
-
-            // Capture current time and add it to the connectionTimeout
-            conStateIter->second.timeout = chrono::system_clock::now() + config.connectionTimeout;
-
-            // Handle current stage
-            switch (conStateIter->second.stage) {
-            case internal::Stage::REQ:
-              // Only process if EPOLLIN event is reported
-              if (conEvents[i].events & EPOLLIN) {
-                // Continue processing request
-                if (!ProcessRequest(conStateIter->second)) {
-                  // If encountered critical error, just close connection (erase from map)
-                  conStateMap.erase(conStateIter);
-                }
-              }
-              break;
-            case internal::Stage::FUNC_BODY:
-              // Only process if EPOLLIN event is reported
-              if (conEvents[i].events & EPOLLIN) {
-                // Continue process body
-                if (!ProcessBody(conStateIter->second)) {
-                  // If encountered critical error, just close connection (erase from map)
-                  conStateMap.erase(conStateIter);
-                }
-              }
-              break;
-            case internal::Stage::RES:
-              // Only process if EPOLLOUT event is reported
-              if (conEvents[i].events & EPOLLOUT) {
-                // Continue sending response
-                if (!ProcessResponse(conStateIter->second)) {
-                  // If encountered critical error or explicit close request (Connection: close)
-                  // close connection (erase from map)
-                  conStateMap.erase(conStateIter);
-                }
-              }
-              break;
-            case internal::Stage::CLEANUP:
-              // Only process if EPOLLIN event is reported
-              if (conEvents[i].events & EPOLLIN) {
-                // Continue cleanup (draining the body)
-                if (!ProcessCleanup(conStateIter->second)) {
-                  // If encountered critical error or explicit close request (Connection: close)
-                  // close connection (erase from map)
-                  conStateMap.erase(conStateIter);
-                }
-              }
-              break;
-            default:
-              // Other stages are not invoked by epoll events
-              // but through other stages
-              break;
-            }
+            };
           }
         }
       }
@@ -1873,8 +1809,126 @@ namespace SimpleHTTP {
     void Kill() {
       coreSocket.closefd();
     }
+
     
   private:
+    // Core bsd socket
+    internal::FileDescriptor coreSocket;
+    // Socket addr
+    struct sockaddr coreSockAddr;
+    // Socket flags
+    int sockFlags;
+    // Server configuration
+    ServerConfiguration config;
+
+    // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
+    // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
+    // with their respective handler functions.
+    unordered_map<string, unordered_map<string, function<Task<bool>(
+      Request&,
+      Body&,
+      Response&
+    )>>> routeMap;
+
+
+    /**
+     * Initializes a tcp connection
+     *
+     * Returns a valid connectionState if the connection is established
+     *
+     * Returns nullopt if the connection could not be established
+     */
+    optional<internal::ConnectionState> InitializeConnection(
+      internal::FileDescriptor &epollSocket,
+      struct epoll_event &event,
+      struct epoll_event &baseEvent) {
+
+      // Prepare accept() attributes
+      struct sockaddr conSockAddr = coreSockAddr;
+      socklen_t conSockLen = sizeof(conSockAddr);
+      // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
+      // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
+      // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
+      internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
+      if (conSocket.getfd() > 0) {
+        // Copy options from base event
+        struct epoll_event conEvent = baseEvent;
+        // Add custom fd to identify the connection
+        conEvent.data.fd = conSocket.getfd();
+        // Add connection to list of interest on epoll instance
+        int res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
+        if (res == 0) {
+          // Move the socket to the returned ConnectionState
+          return internal::ConnectionState{
+            // Move filedescriptor from conSocket
+            .fd = std::move(conSocket),
+            // Set stage to REQ
+            .stage = internal::Stage::REQ,
+            // Set expiration time
+            .expirationTime = chrono::system_clock::now() + config.connectionTimeout
+          };
+        }
+      }
+      return nullopt;
+    }
+
+
+    /**
+     * Handle ongoing connection based on the epoll_event reported and the associated ConnectionState
+     *
+     * Returns true if the eventloop can process
+     *
+     * Returns false to indicate that the connection should be closed (on tcp layer)
+     */
+    bool HandleConnection(struct epoll_event &event, internal::ConnectionState &state) {
+
+      // Check if underlying connection failed or hangup
+      if (event.events & EPOLLERR || event.events & EPOLLHUP) {
+        // At the moment I do not see sufficient reason to handle error further
+        return false;
+      }
+
+      // Capture current time and add it to the connectionTimeout
+      state.expirationTime = chrono::system_clock::now() + config.connectionTimeout;
+
+      // Handle current stage
+      switch (state.stage) {
+      case internal::Stage::REQ:
+        // Only process if EPOLLIN event is reported
+        if (event.events & EPOLLIN)
+          // Continue processing request
+          // If encountered critical error, just close connection (erase from map)
+          return ProcessRequest(state);
+        break;
+      case internal::Stage::FUNC_BODY:
+        // Only process if EPOLLIN event is reported
+        if (event.events & EPOLLIN)
+          // Continue process body
+          // If encountered critical error, just close connection
+          return ProcessBody(state);
+        break;
+      case internal::Stage::RES:
+        // Only process if EPOLLOUT event is reported
+        if (event.events & EPOLLOUT)
+          // Continue sending response
+          // If encountered critical error or explicit close request (Connection: close)
+          return ProcessResponse(state);
+        break;
+      case internal::Stage::CLEANUP:
+        // Only process if EPOLLIN event is reported
+        if (event.events & EPOLLIN)
+          // Continue cleanup (draining the body)
+          // If encountered critical error or explicit close request (Connection: close)
+          return ProcessCleanup(state);
+        break;
+      default:
+        // Other stages are not invoked by epoll events
+        // but through other stages
+        break;
+      }
+      return true;
+    }
+    
     /**
      * Process request based on connection state
      *
@@ -1902,7 +1956,7 @@ namespace SimpleHTTP {
         // Parse current buffer
         try {
           // Deserialize request
-          bool res = DeserializeRequest(state.reqBuffer, state.request);
+          bool res = DeserializeRequest(state.reqBuffer, *state.request);
           // Check if serialized part before cursor exceeds maxHeaderSize.
           // This check, performed post-serialization, ensures body parts in the buffer
           // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
@@ -1914,7 +1968,7 @@ namespace SimpleHTTP {
             continue;
           }
         } catch (exception &e) {
-          state.response
+          (*state.response)
             .setStatusCode(400)
             .setStatusReason("Bad Request")
             .setContentType("text/plain")
@@ -1929,13 +1983,13 @@ namespace SimpleHTTP {
         // Currently only chunked is supported,
         // which means other encodings will return an error to then sender
         bool isChunked = false;
-        auto transferEncoding = state.request.getTransferEncoding();
+        auto transferEncoding = state.request->getTransferEncoding();
         if (transferEncoding.has_value()) {
           for (auto encoding : transferEncoding.value()) {
             if (encoding=="chunked")
               isChunked = true;
             else {
-              state.response
+              (*state.response)
                 .setStatusCode(501)
                 .setStatusReason("Not Implemented")
                 .setContentType("text/plain")
@@ -1950,7 +2004,7 @@ namespace SimpleHTTP {
         // If content length is not specified bodySize is set to 0
         // assuming no body is provided (except if it is chunked)
         int bodySize = 0;
-        auto contentLength = state.request.getContentLength();
+        auto contentLength = state.request->getContentLength();
         if (contentLength.has_value()) {
           bodySize = contentLength.value();
         }
@@ -1965,13 +2019,13 @@ namespace SimpleHTTP {
         if (isChunked)
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // ChunkedBody will interpret data chunked
-          state.body = ChunkedBody(
+          state.body = make_unique<ChunkedBody>(
             &state.fd, config.sockBufferSize, std::move(state.reqBuffer)
           );
         else
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // FixedBody will interpret data with a fixed length
-          state.body = FixedBody(
+          state.body = make_unique<FixedBody>(
             &state.fd, config.sockBufferSize, bodySize, std::move(state.reqBuffer)
           );
           
@@ -2123,31 +2177,31 @@ namespace SimpleHTTP {
      */
     bool InitializeFunction(internal::ConnectionState &state) {
       // Find route
-      auto routeIter = routeMap.find(state.request.getPath());
+      auto routeIter = routeMap.find(state.request->getPath());
       if (routeIter != routeMap.end()) {
-        state.response
+        (*state.response)
           .setStatusCode(404)
           .setStatusReason("Not Found")
           .setContentType("text/plain")
-          .setBody("The requested resource "+state.request.getPath()+" was not found on this server");
+          .setBody("The requested resource "+state.request->getPath()+" was not found on this server");
         state.stage = internal::RES;
         return true;
       }
       // Find type / method on the route
-      auto handlerIter = routeIter->second.find(state.request.getMethod());
+      auto handlerIter = routeIter->second.find(state.request->getMethod());
       if (handlerIter != routeIter->second.end()) {
-        state.response
+        (*state.response)
           .setStatusCode(405)
           .setStatusReason("Method Not Allowed")
           .setContentType("text/plain")
-          .setBody("The method "+state.request.getMethod()+" is not allowed for the requested resource");
+          .setBody("The method "+state.request->getMethod()+" is not allowed for the requested resource");
         state.stage = internal::RES;
         return true;
       }
 
       // Create function handle
       // Coroutine is immediately suspended due to the promise which uses suspend_always as initial_suspend
-      state.funcHandle = handlerIter->second(state.request, state.body, state.response);
+      state.funcHandle = handlerIter->second(*state.request, *state.body, *state.response);
 
       // Directly start processing coroutine
       return ProcessFunction(state);
@@ -2160,6 +2214,8 @@ namespace SimpleHTTP {
      */
     bool ProcessFunction(internal::ConnectionState &state) {
       // Resume function execution
+      // Unhandled exceptions of the function are NOT catched
+      // If an exception is thrown in the user defined function it is thrown to the caller of Serve()
       auto res = state.funcHandle.resume();
       if (res.has_value()) {
         // If has value, the function returned
@@ -2172,7 +2228,7 @@ namespace SimpleHTTP {
           // This can be beneficial when a large unread body is provided by the client,
           // avoiding the need to drain the body and potentially increasing performance.
           // Set connection header to close, this will close the tcp socket
-          state.request.setHeader("connection", "close");
+          state.request->setHeader("connection", "close");
           state.stage = internal::Stage::RES;
           return true;
         }
@@ -2192,7 +2248,7 @@ namespace SimpleHTTP {
     bool ProcessBody(internal::ConnectionState &state) {
       try {
         // Handle pending request
-        if (state.body.processRequest()) {
+        if (state.body->processRequest()) {
           // If the request processor returns true, coroutine can be resumed
           state.stage = internal::Stage::FUNC_PROC;
           return ProcessFunction(state);
@@ -2201,13 +2257,13 @@ namespace SimpleHTTP {
           // In order to do this, the stage remains FUNC_BODY and is processed in the next event loop
           return true;
         }
-      } catch (exception err) {
+      } catch (exception &e) {
         // Exception occured on reading body
-        state.response
+        (*state.response)
           .setStatusCode(400)
           .setStatusReason("Bad Request")
           .setContentType("text/plain")
-          .setBody("Invalid body encoding. "+string(err.what()));
+          .setBody("Invalid body encoding. "+string(e.what()));
         state.stage = internal::Stage::RES;
         return true;
       }
@@ -2221,9 +2277,9 @@ namespace SimpleHTTP {
     bool ProcessResponse(internal::ConnectionState &state) {
       if (state.resBuffer.empty()) {
         // Set date header to now
-        state.response.setDate(chrono::system_clock::now());
+        state.response->setDate(chrono::system_clock::now());
         // Serialize response
-        SerializeResponse(state.response, state.resBuffer);
+        SerializeResponse(*state.response, state.resBuffer);
       }
       while(1) {
         int n = send(
@@ -2244,7 +2300,7 @@ namespace SimpleHTTP {
         state.resBuffer.increment(n);
         // Check if all data is sent, if yes the operation is finished
         if (state.resBuffer.sizeAfterCursor() < 1) {
-          if (state.request.getHeader("connection")=="close") {
+          if (state.request->getHeader("connection")=="close") {
             // If connection header is set to "close". Explicitly close the connection
             return false;
           } else {
@@ -2299,20 +2355,30 @@ namespace SimpleHTTP {
      * Returns false if the connection should be closed
      */
     bool ProcessCleanup(internal::ConnectionState &state) {
+      if (!state.body) {
+        // If no body processor is attached (e.g. on critical errors before processing function)
+        // tcp connection is closed immediately as the request cannot be drained
+        return false;
+      }
       try {
         // Continue draining body
         // If draining the body overfetches data from the socket
         // this data is stored to the overfetchBuffer
         // and moved to the new ConnectionStates reqBuffer
-        auto overfetchBuffer = state.body.drainBody();
+        auto overfetchBuffer = state.body->drainBody();
         if (overfetchBuffer.has_value()) {
           // If body is fully cleared,
           // reset connection state by creating a new object and moving the fd
           // The overfetched buffer is moved to the reqBuffer
           state = internal::ConnectionState{
+            // Move filedescriptor from old filedescriptor
             .fd = std::move(state.fd),
+            // Set stage to REQ
             .stage = internal::Stage::REQ,
-            .reqBuffer = overfetchBuffer.value()
+            // Add overfetched buffer
+            .reqBuffer = overfetchBuffer.value(),
+            // Set expiration time
+            .expirationTime = chrono::system_clock::now() + config.connectionTimeout
           };
           return true;
         } else {
@@ -2320,7 +2386,7 @@ namespace SimpleHTTP {
           // keep connection setup to continue draining the body when more data is available
           return true;
         }
-      } catch (exception err) {
+      } catch (exception &_) {
         // Exception occured while draining body
         // Close underlying connection
         return false;
