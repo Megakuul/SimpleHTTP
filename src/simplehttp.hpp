@@ -166,14 +166,14 @@ namespace SimpleHTTP {
        * Initialize buffer, move other buffer data and reset cursor
        */
       Buffer(Buffer&& other) noexcept : buffer(std::move(other.buffer)),
-                                        headCursor(0),
-                                        rollbackCursor(0) {}
+                                        headCursor(-1),
+                                        rollbackCursor(-1) {}
       /**
        * Initialize buffer, copy other buffer data and reset cursor
        */
       Buffer(const Buffer& other) noexcept : buffer(other.buffer),
-                                             headCursor(0),
-                                             rollbackCursor(0) {}
+                                             headCursor(-1),
+                                             rollbackCursor(-1) {}
 
       /**
        * Assignes new buffer to object and resets cursors
@@ -181,8 +181,8 @@ namespace SimpleHTTP {
       Buffer& operator=(Buffer&& other) noexcept {
         if (this!=&other) {
           buffer = std::move(other.buffer);
-          headCursor = 0;
-          rollbackCursor = 0;
+          headCursor = -1;
+          rollbackCursor = -1;
         }
         return *this;
       }
@@ -193,8 +193,8 @@ namespace SimpleHTTP {
       Buffer& operator=(const Buffer& other) noexcept {
         if (this!=&other) {
           buffer = other.buffer;
-          headCursor = 0;
-          rollbackCursor = 0;
+          headCursor = -1;
+          rollbackCursor = -1;
         }
         return *this;
       }
@@ -204,8 +204,8 @@ namespace SimpleHTTP {
        */
       Buffer& operator=(const string& other) {
         buffer = other;
-        headCursor = 0;
-        rollbackCursor = 0;
+        headCursor = -1;
+        rollbackCursor = -1;
         return *this;
       }
 
@@ -214,8 +214,8 @@ namespace SimpleHTTP {
        */
       Buffer& operator=(const char* other) {
         buffer = other;
-        headCursor = 0;
-        rollbackCursor = 0;
+        headCursor = -1;
+        rollbackCursor = -1;
         return *this;
       }
 
@@ -242,9 +242,14 @@ namespace SimpleHTTP {
       
       /**
        * Get char at head cursor position
+       *
+       * If cursor is -1 nullopt is returned
        */
-      char current() {
-        return buffer[headCursor];
+      optional<char> current() {
+        if (headCursor>-1)
+          return buffer[headCursor];
+        else
+          return nullopt;
       }
       
       /**
@@ -262,7 +267,7 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Rollback head cursor to latest commit (or 0 if there was no commit)
+       * Rollback head cursor to latest commit (or -1 if there was no commit)
        */
       Buffer& rollback() {
         headCursor = rollbackCursor;
@@ -280,10 +285,10 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Set head cursor to 0
+       * Set head cursor to -1
       */
       Buffer& reset() {
-        headCursor = 0;
+        headCursor = -1;
         return *this;
       }
 
@@ -292,7 +297,7 @@ namespace SimpleHTTP {
        * and the cursor is not changed
        */
       bool set(int newpos) {
-        if (newpos<int(buffer.size()) && newpos>=0) {
+        if (newpos<int(buffer.size()) && newpos>=-1) {
           headCursor = newpos;
           return true;
         } else
@@ -305,7 +310,7 @@ namespace SimpleHTTP {
        */
       bool increment(int update) {
         int nextCursor = headCursor+update;
-        if (nextCursor<int(buffer.size()) && nextCursor>=0) {
+        if (nextCursor<int(buffer.size()) && nextCursor>=-1) {
           headCursor = nextCursor;
           return true;
         } else
@@ -371,58 +376,89 @@ namespace SimpleHTTP {
        *
        * Note that regular C-style operations will not work as expected if the underlying data
        * is not strictly string data (if it can contain \0)
+       *
+       * If cursor is on -1 the 0-index ptr is returned
        */
       const char* cstrAfterCursor() {
-        return &buffer[headCursor];
+        if (headCursor>-1)
+          return &buffer[headCursor];
+        else
+          return &buffer[0];
       }
 
       /**
        * Get copy of the underlying string from the head cursor (including head cursor)
+       *
+       * If cursor is on -1 the string from 0 to end is returned
        */
       string strAfterCursor() {
-        return string(buffer.begin()+headCursor, buffer.end());
+        if (headCursor>-1)
+          return string(buffer.begin()+headCursor, buffer.end());
+        else
+          return string(buffer.begin(), buffer.end());
       }
 
       /**
        * Get copy of the underlying string from index 0 to head cursor (head cursor not included)
+       *
+       * If cursor is on -1 an empty string is returned
        */
       string strBeforeCursor() {
-        return string(buffer.begin(), buffer.begin()+headCursor);
+        if (headCursor>-1)
+          return string(buffer.begin(), buffer.begin()+headCursor);
+        else
+          return "";
       }
 
       /**
        * Get copy of the underlying data from the head cursor (including head cursor)
+       *
+       * If cursor is on -1 the data from 0 to end is returned
        */
       vector<unsigned char> vecAfterCursor() {
-        return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
+        if (headCursor>-1)
+          return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
+        else
+          return vector<unsigned char>(buffer.begin(), buffer.end());
       }
 
       /**
        * Get copy of the underlying data from index 0 to head cursor (head cursor not included)
+       *
+       * If cursor is on -1 an empty array is returned
        */
       vector<unsigned char> vecBeforeCursor() {
-        return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor);
+        if (headCursor>-1)
+          return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor);
+        else
+          return {};
       }
 
       /**
        * Erases the buffer from index 0 to head cursor (head cursor not included)
        *
-       * This will also move the head cursor to 0 and commit this change
+       * This will also move the head cursor to -1 and commit this change
        * (after the operation the cursor is essentially on the same element as before)
        *
        * Incrementing the offset will make it erase more data of the right side of the cursor
+       *
+       * If cursor is on -1 (after offset is applied) data is erased from 0 to 0 (no data is erased)
        */
       Buffer& eraseBeforeCursor(uint offset=0) {
         // Create the index, up to which the data will be erased
         int index = headCursor+offset;
-        // Check if in bounds
+        // Check if in lower bounds
+        if (index<0)
+          // If cursor is on -1 and no offset is applied index is capped to 0
+          index = 0;
+        // Check if in upper bounds
         if (index>int(buffer.size()))
           // If size exceeded, cap index to buffer size
           index = buffer.size();
         // Erase data
         buffer.erase(buffer.begin(), buffer.begin()+index);
         // Set and commit cursor to 0
-        set(0);
+        set(-1);
         commit();
         return *this;
       }
@@ -434,6 +470,8 @@ namespace SimpleHTTP {
        * (after the operation the cursor is at the last valid element in the buffer)
        *
        * Incrementing the offset will make it erase more data of the left side of the cursor
+       *
+       * If cursor is on -1 (or gets there by incrementing the offset) data is erased from 0 to end
        */
       Buffer& eraseAfterCursor(uint offset=0) {
         // Create the index, after which the data will be erased
@@ -465,8 +503,8 @@ namespace SimpleHTTP {
 
     private:
       string buffer;
-      int headCursor = 0;
-      int rollbackCursor = 0;
+      int headCursor = -1;
+      int rollbackCursor = -1;
     };
   }
 
@@ -1972,7 +2010,7 @@ namespace SimpleHTTP {
             .setStatusCode(400)
             .setStatusReason("Bad Request")
             .setContentType("text/plain")
-            .setBody(e.what());
+            .setBody(string(e.what())+"\n");
           state.stage = internal::Stage::RES;
           return true;
         }
@@ -1993,7 +2031,7 @@ namespace SimpleHTTP {
                 .setStatusCode(501)
                 .setStatusReason("Not Implemented")
                 .setContentType("text/plain")
-                .setBody("Transfer-Encoding "+encoding+" is not supported");
+                .setBody("Transfer-Encoding "+encoding+" is not supported\n");
               state.stage = internal::Stage::RES;
               return true;
             }
@@ -2178,23 +2216,23 @@ namespace SimpleHTTP {
     bool InitializeFunction(internal::ConnectionState &state) {
       // Find route
       auto routeIter = routeMap.find(state.request->getPath());
-      if (routeIter != routeMap.end()) {
+      if (routeIter == routeMap.end()) {
         (*state.response)
           .setStatusCode(404)
           .setStatusReason("Not Found")
           .setContentType("text/plain")
-          .setBody("The requested resource "+state.request->getPath()+" was not found on this server");
+          .setBody("The requested resource "+state.request->getPath()+" was not found on this server\n");
         state.stage = internal::RES;
         return true;
       }
       // Find type / method on the route
       auto handlerIter = routeIter->second.find(state.request->getMethod());
-      if (handlerIter != routeIter->second.end()) {
+      if (handlerIter == routeIter->second.end()) {
         (*state.response)
           .setStatusCode(405)
           .setStatusReason("Method Not Allowed")
           .setContentType("text/plain")
-          .setBody("The method "+state.request->getMethod()+" is not allowed for the requested resource");
+          .setBody("The method '"+state.request->getMethod()+"' is not allowed for the requested resource\n");
         state.stage = internal::RES;
         return true;
       }
@@ -2263,7 +2301,7 @@ namespace SimpleHTTP {
           .setStatusCode(400)
           .setStatusReason("Bad Request")
           .setContentType("text/plain")
-          .setBody("Invalid body encoding. "+string(e.what()));
+          .setBody("Invalid body encoding. "+string(e.what())+"\n");
         state.stage = internal::Stage::RES;
         return true;
       }
