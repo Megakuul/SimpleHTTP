@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <chrono>
 #include <coroutine>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -489,16 +490,26 @@ namespace SimpleHTTP {
       
       /**
        * Returns the size of the buffer from the head cursor (including head cursor)
+       *
+       * If cursor is on -1 the size the size of the full buffer (akin to size())
        */
       int sizeAfterCursor() {
-        return buffer.size() - headCursor;
+        if (headCursor>-1)
+          return buffer.size() - headCursor;
+        else
+          return buffer.size();
       }
 
       /**
        * Returns the size of the buffer from 0 to head cursor
+       *
+       * If cursor is on -1 the size is 0
        */
       int sizeBeforeCursor() {
-        return headCursor;
+        if (headCursor>-1)
+          return headCursor;
+        else
+          return 0;
       }
 
     private:
@@ -530,9 +541,12 @@ namespace SimpleHTTP {
         return Task{coroutine_handle<promise_type>::from_promise(*this)};
       }
       // Predefined function called when coroutine is initialized
+      // Coroutine is immediately suspended when created
       suspend_always initial_suspend() { return {}; }
       // Predefined function called before coroutine is destroyed (value is returned)
-      suspend_never final_suspend() noexcept { return {}; } // Don't suspend, directly destroy coroutine
+      // Suspend finished coroutine, to obtain things like return value / exception from the frame
+      // Without suspending the operation after completion, the resources may be cleaned up before reading
+      suspend_always final_suspend() noexcept { return {}; } 
       // Predefined function called when returning the value (co_return)
       void return_value(T v) { value = v; } // Store return value in promise frame before handle is destroyed
       // Predefined function called when exception is thrown
@@ -624,10 +638,6 @@ namespace SimpleHTTP {
     }
 
     Request& setMethod(string newmethod) {
-      // Convert method tolower
-      transform(newmethod.begin(), newmethod.end(), newmethod.begin(),
-        [](unsigned char c){ return tolower(c); }
-      );
       method = newmethod;
       return *this;
     }
@@ -637,10 +647,7 @@ namespace SimpleHTTP {
     }
 
     Request& setPath(string newpath) {
-      // Convert path tolower
-      transform(newpath.begin(), newpath.end(), newpath.begin(),
-        [](unsigned char c){ return tolower(c); }
-      );
+      // TODO: Implement query param / fragment parser
       path = newpath;
       return *this;
     }
@@ -650,10 +657,6 @@ namespace SimpleHTTP {
     }
 
     Request& setVersion(string newversion) {
-      // Convert version tolower
-      transform(newversion.begin(), newversion.end(), newversion.begin(),
-        [](unsigned char c){ return tolower(c); }
-      );
       version = newversion;
       return *this;
     }
@@ -1651,17 +1654,13 @@ namespace SimpleHTTP {
      * (connection remains open after the body is drained)
      *
      *
-     * Func shall NOT perform any IO operation besides those provided by simplehttp.
+     * Func shall NOT perform any blocking IO operation besides those provided by simplehttp.
      * Performing another blocking IO operation will block the whole HTTP server, not just this function!
      */
     void Route(string method, string route, function<Task<bool>(Request&, Body&, Response&)> func) {
-      // Convert method tolower
+      // Convert method toupper
       transform(method.begin(), method.end(), method.begin(),
-        [](unsigned char c){ return tolower(c); }
-      );
-      // Convert route tolower
-      transform(route.begin(), route.end(), route.begin(),
-        [](unsigned char c){ return tolower(c); }
+        [](unsigned char c){ return toupper(c); }
       );
 
       // Add method to the route
@@ -2255,6 +2254,7 @@ namespace SimpleHTTP {
       // Unhandled exceptions of the function are NOT catched
       // If an exception is thrown in the user defined function it is thrown to the caller of Serve()
       auto res = state.funcHandle.resume();
+
       if (res.has_value()) {
         // If has value, the function returned
         if (res.value()) {
@@ -2337,7 +2337,8 @@ namespace SimpleHTTP {
         // Increment res buffer by the read bytes
         state.resBuffer.increment(n);
         // Check if all data is sent, if yes the operation is finished
-        if (state.resBuffer.sizeAfterCursor() < 1) {
+        // 'cause sizeAfterCursor includes the cursor, 1 means everything is processed
+        if (state.resBuffer.sizeAfterCursor() <= 1) {
           if (state.request->getHeader("connection")=="close") {
             // If connection header is set to "close". Explicitly close the connection
             return false;
