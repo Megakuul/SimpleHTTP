@@ -48,9 +48,9 @@ int main(void) {
   // Create route to add an element to the list
   server.Route("POST", "/add", [](Request &req, Body &body, Response &res) -> Task<bool> {
     // Read all data from the body
-    vector<unsigned char> data = co_await body.readAll();
+    vector<unsigned char> data = co_await body.read(10);
     // Insert data into the list
-    list.push_back(string(data.begin(), data.end()));
+    list.push_back(string(data.begin(), data.end())+"\n");
 
     // Define response object
     res
@@ -63,8 +63,7 @@ int main(void) {
 
   // Create route to read an element from the list
   server.Route("GET", "/get", [](Request &req, Body &body, Response &res) -> Task<bool> {
-
-    // Fetch element
+    // Fetch top element
     string item = list.front();
     // Define response object
     res

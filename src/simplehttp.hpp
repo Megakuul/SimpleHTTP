@@ -393,7 +393,7 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Get copy of the underlying string from the head cursor (including head cursor)
+       * Get copy of the underlying string from the head cursor (head cursor included)
        *
        * If cursor is on -1 the string from 0 to end is returned
        */
@@ -405,19 +405,19 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Get copy of the underlying string from index 0 to head cursor (head cursor not included)
+       * Get copy of the underlying string from index 0 to head cursor (head cursor included)
        *
        * If cursor is on -1 an empty string is returned
        */
       string strBeforeCursor() {
         if (headCursor>-1)
-          return string(buffer.begin(), buffer.begin()+headCursor);
+          return string(buffer.begin(), buffer.begin()+headCursor+1);
         else
           return "";
       }
 
       /**
-       * Get copy of the underlying data from the head cursor (including head cursor)
+       * Get copy of the underlying data from the head cursor (head cursor included)
        *
        * If cursor is on -1 the data from 0 to end is returned
        */
@@ -429,19 +429,19 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Get copy of the underlying data from index 0 to head cursor (head cursor not included)
+       * Get copy of the underlying data from index 0 to head cursor (head cursor included)
        *
        * If cursor is on -1 an empty array is returned
        */
       vector<unsigned char> vecBeforeCursor() {
         if (headCursor>-1)
-          return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor);
+          return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor+1);
         else
           return {};
       }
 
       /**
-       * Erases the buffer from index 0 to head cursor (head cursor not included)
+       * Erases the buffer from index 0 to head cursor (head cursor included)
        *
        * This will also move the head cursor to -1 and commit this change
        * (after the operation the cursor is essentially on the same element as before)
@@ -462,7 +462,7 @@ namespace SimpleHTTP {
           // If size exceeded, cap index to buffer size
           index = buffer.size();
         // Erase data
-        buffer.erase(buffer.begin(), buffer.begin()+index);
+        buffer.erase(buffer.begin(), buffer.begin()+index+1);
         // Set and commit cursor to 0
         set(-1);
         commit();
@@ -470,7 +470,7 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Erases the buffer from head cursor (including head cursor)
+       * Erases the buffer from head cursor (head cursor included)
        *
        * This will also move the head cursor one position back and commit this change
        * (after the operation the cursor is at the last valid element in the buffer)
@@ -494,7 +494,7 @@ namespace SimpleHTTP {
       }
       
       /**
-       * Returns the size of the buffer from the head cursor (including head cursor)
+       * Returns the size of the buffer from the head cursor (head cursor included)
        *
        * If cursor is on -1 the size the size of the full buffer (akin to size())
        */
@@ -506,15 +506,12 @@ namespace SimpleHTTP {
       }
 
       /**
-       * Returns the size of the buffer from 0 to head cursor
+       * Returns the size of the buffer from 0 to head cursor (head cursor included)
        *
        * If cursor is on -1 the size is 0
        */
       int sizeBeforeCursor() {
-        if (headCursor>-1)
-          return headCursor;
-        else
-          return 0;
+        return headCursor+1;
       }
 
     private:
@@ -652,8 +649,7 @@ namespace SimpleHTTP {
     }
 
     Request& setPath(string newpath) {
-      // TODO: Implement query param / fragment parser
-      path = newpath;
+      path = parseQueryParameters(newpath);
       return *this;
     }
 
@@ -682,19 +678,8 @@ namespace SimpleHTTP {
       auto it = headers.find("transfer-encoding");
       if (it == headers.end()) return nullopt;
 
-      unordered_set<string> tokens;
-      istringstream iss(it->second);
-      string currentItem;
-      // Parse Transfer Encodings
-      while (getline(iss, currentItem, ',')) {
-        // Trim off spaces
-        auto start = currentItem.find_first_not_of(" ");
-        auto end = currentItem.find_last_not_of(" ");
-        // Skip if no regular char was found in the item
-        if (start==string::npos || end==string::npos) continue;
-        // Insert slice without spaces 
-        tokens.insert(currentItem.substr(start, end - start + 1));
-      }
+      // Convert transfer-encoding to a string set
+      auto tokens = parseTransferEncoding(it->second);
       // If no tokens are found return nullopt
       if (tokens.empty()) return nullopt;
       return tokens;
@@ -743,8 +728,73 @@ namespace SimpleHTTP {
     // HTTP Version (e.g. HTTP/1.1)
     string version;
 
+    // HTTP queries
+    unordered_map<string, string> queries;
     // HTTP headers
     unordered_map<string, string> headers;
+
+    /**
+     * Parse query parameters from url and insert them to the queries map
+     *
+     * Query params are automatically inserted into the queries map
+     *
+     * Returns path without query parameters
+     */
+    string parseQueryParameters(string path) {
+      // Search query indicator
+      int queryPos = path.find('?');
+      // If no query indicator is found, the path is not modified
+      if (queryPos == string::npos) return path;
+      // Obtain the new path (query params removed)
+      string newPath = path.substr(0, queryPos);
+      
+      // Obtain the query param string as input stream
+      istringstream queryStream(path.substr(queryPos+1));
+
+      // Define token buffer
+      string token;
+      // Iterate over every query param (key=value) fragment
+      while (getline(queryStream, token, '&')) {
+        // Search split character ("=")
+        int splitPos = token.find('=');
+        // If split char not found, the fragment is invalid and skipped
+        if (splitPos==string::npos) continue;
+
+        // Obtain query param key (first substr)
+        string key = token.substr(0, splitPos);
+        // Obtain query param value (second substr)
+        string value = token.substr(splitPos+1);
+
+        // Move values to the queries map
+        queries[std::move(key)] = std::move(value);
+      }
+      return newPath;
+    }
+
+    /**
+     * Parse transfer encoding header into a string set
+     *
+     * Returns tokens parsed as string set
+     */
+    unordered_set<string> parseTransferEncoding(string rawValue) {
+      unordered_set<string> tokens;
+      // Create input stream
+      istringstream iss(rawValue);
+      string currentItem;
+      // Parse Transfer Encodings
+      while (getline(iss, currentItem, ',')) {
+        // Trim off spaces
+        auto start = currentItem.find_first_not_of(" ");
+        auto end = currentItem.find_last_not_of(" ");
+        // Skip if no regular char was found in the item
+        if (start==string::npos || end==string::npos) continue;
+        // Insert slice without spaces 
+        tokens.insert(currentItem.substr(start, end - start + 1));
+      }
+      return tokens;
+    }
+
+    
   };
 
 
@@ -911,7 +961,8 @@ namespace SimpleHTTP {
         // Check if readBuffer contains enough data
         if (readBuffer.size() >= req.size) {
           // Set cursor to requested index + 1 (requested size)
-          readBuffer.set(req.size);
+          readBuffer.set(req.size-1);
+          
           // Copy the requested data (0-requested index) to outBuffer
           *req.outBuffer = readBuffer.vecBeforeCursor();
           // Erase the removed data from the buffer
@@ -964,9 +1015,10 @@ namespace SimpleHTTP {
         // This highly improves performance 
         unsigned char buffer[bodySize];
         int n = recv(socket->getfd(), buffer, bodySize, 0);
-        if (n == 0)
+        if (n == 0) {
           // If connection was closed by peer, this is unexpected. The eventloop will clean it up
           throw runtime_error("Connection closed unexpectedly");
+        }
         if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
@@ -1209,8 +1261,8 @@ namespace SimpleHTTP {
         throw runtime_error("Expected CRLF after chunk");
       }
 
-      // Erase chunk + chunkSize before cursor (+ 1 offset to also remove the current value)
-      readBuffer.eraseBeforeCursor(1);
+      // Erase chunk + chunkSize before cursor
+      readBuffer.eraseBeforeCursor();
       
       return true;
     }
@@ -1246,8 +1298,8 @@ namespace SimpleHTTP {
         throw runtime_error("Expected CRLF after chunk");
       }
 
-      // Erase chunk + chunkSize before cursor (+ 1 offset to also remove the current value)
-      readBuffer.eraseBeforeCursor(1);
+      // Erase chunk + chunkSize before cursor
+      readBuffer.eraseBeforeCursor();
       
       return true;
     }
@@ -1833,13 +1885,15 @@ namespace SimpleHTTP {
             if (!HandleConnection(conEvents[i], conStateIter->second)) {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
               conStateMap.erase(conStateIter);
+              continue;
             };
 
             // Update epoll interest for the connection, if false is returned, connection is cleaned up
             if (!UpdateEventInterest(epollSocket, conEvents[i], conStateIter->second.stage)) {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
               conStateMap.erase(conStateIter);
-            };            
+              continue;
+            };
           }
         }
       }
@@ -1854,7 +1908,7 @@ namespace SimpleHTTP {
      *
      * Kill() will essentially close the core socket of the server
      * This leads to the following events:
-     * - Immediately new tcp connections to the server are rejected
+     * - Immediately, new tcp connections to the server are rejected
      * - Running sessions are closed on tcp level in the next event loop
      * - The blocking Serve() will exit after next event loop
      *
@@ -1963,10 +2017,11 @@ namespace SimpleHTTP {
         break;
       case internal::Stage::RES:
         // Only process if EPOLLOUT event is reported
-        if (event.events & EPOLLOUT)
+        if (event.events & EPOLLOUT) {
           // Continue sending response
           // If encountered critical error or explicit close request (Connection: close)
           return ProcessResponse(state);
+        }
         break;
       case internal::Stage::CLEANUP:
         // Only process if EPOLLIN event is reported
@@ -2104,15 +2159,15 @@ namespace SimpleHTTP {
         // Analyze content length
         // If content length is not specified bodySize is set to 0
         // assuming no body is provided (except if it is chunked)
+        
         int bodySize = 0;
         auto contentLength = state.request->getContentLength();
         if (contentLength.has_value()) {
           bodySize = contentLength.value();
         }
 
-        // Erase processed buffer
-        // Offset is set to 1 to remove the current token (which is most likely '\n')
-        state.reqBuffer.eraseBeforeCursor(1);
+        // Erase processed buffer (include current token (which is most likely '\n'))
+        state.reqBuffer.eraseBeforeCursor();
 
         // State reqBuffer is moved into body, as we won't use the buffer anymore,
         // the move will omit copying the underlying data (the body)
@@ -2264,8 +2319,8 @@ namespace SimpleHTTP {
             }
             value += c.value();
           }
+        } else
           identifier += c.value();
-        }
       }
     }
 
