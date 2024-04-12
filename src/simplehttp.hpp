@@ -20,36 +20,41 @@
 #ifndef SIMPLEHTTP_H
 #define SIMPLEHTTP_H
 
-#include <asm-generic/socket.h>
+// Libs available on >libstdc++20 / >libc++20
 #include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <coroutine>
-#include <cstdio>
-#include <cstring>
-#include <ctime>
 #include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sstream>
+#include <utility>
+#include <vector>
+
+#include <unordered_map>
+#include <unordered_set>
+
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <format>
 
+#include <coroutine>
+
+// Libs available on POSIX systems
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/un.h>
-#include <sys/epoll.h>
 #include <fcntl.h>
-#include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
+
+// Lib only available on Linux systems
+#include <sys/epoll.h>
 
 
 using namespace std;
@@ -920,7 +925,7 @@ namespace SimpleHTTP {
         // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
         unsigned char buffer[socketBufferSize];
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
-        if (n < 0) {
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
@@ -952,14 +957,17 @@ namespace SimpleHTTP {
         // If body is fully read, return true to complete cleanup
         if (bodySize<=0) {
           // Return empty buffer as we directly read the data
-          return {};
+          return internal::Buffer();
         }
         // Read data into a pseudo buffer
         // Unlike with chunkedBody, the data is not cycling over readBuffer
         // This highly improves performance 
         unsigned char buffer[bodySize];
         int n = recv(socket->getfd(), buffer, bodySize, 0);
-        if (n < 0) {
+        if (n == 0)
+          // If connection was closed by peer, this is unexpected. The eventloop will clean it up
+          throw runtime_error("Connection closed unexpectedly");
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
@@ -1038,7 +1046,10 @@ namespace SimpleHTTP {
         // This avoids underfetching (e.g. if read() is called frequently just for several bytes)
         unsigned char buffer[socketBufferSize];
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
-        if (n < 0) {
+        if (n == 0)
+          // If connection was closed by peer, this is unexpected. The eventloop will clean it up
+          throw runtime_error("Connection closed unexpectedly");
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
@@ -1090,7 +1101,10 @@ namespace SimpleHTTP {
         // Try to load the full socketBufferSize to the readBuffer
         unsigned char buffer[socketBufferSize];
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
-        if (n < 0) {
+        if (n == 0)
+          // If connection was closed by peer, this is unexpected. The eventloop will clean it up
+          throw runtime_error("Connection closed unexpectedly");
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
@@ -1355,8 +1369,12 @@ namespace SimpleHTTP {
     uint statusCode = 200;
     // HTTP Status reason, default is OK
     string statusReason = "OK";
-    // HTTP headers
-    unordered_map<string, string> headers;
+    // HTTP headers, default headers are defined
+    unordered_map<string, string> headers = {
+      {"Content-Length", "0"},
+      {"Content-Type", "text/plain"}, 
+      {"Server", "simplehttp"}
+    };
     // Body represented as string
     string body = "";
   };
@@ -1976,7 +1994,7 @@ namespace SimpleHTTP {
         // We take the socket buffersize to read everything at once (if available)
         char buffer[config.sockBufferSize+1];
         int n = recv(state.fd.getfd(), buffer, config.sockBufferSize, 0);
-        if (n < 0) {
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Skip if no data is available to read
             return true;
@@ -1993,7 +2011,7 @@ namespace SimpleHTTP {
         // Parse current buffer
         try {
           // Deserialize request
-          bool res = DeserializeRequest(state.reqBuffer, *state.request);
+          bool res = deserializeRequest(state.reqBuffer, *state.request);
           // Check if serialized part before cursor exceeds maxHeaderSize.
           // This check, performed post-serialization, ensures body parts in the buffer
           // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
@@ -2082,7 +2100,7 @@ namespace SimpleHTTP {
      * Returns false if it needs more data to fully deserialize
      * Parsing errors will lead to an exception
      */
-    bool DeserializeRequest(internal::Buffer &buffer, Request &request) {
+    bool deserializeRequest(internal::Buffer &buffer, Request &request) {
       string identifier = "";
       optional<char> c;
 
@@ -2317,7 +2335,7 @@ namespace SimpleHTTP {
         // Set date header to now
         state.response->setDate(chrono::system_clock::now());
         // Serialize response
-        SerializeResponse(*state.response, state.resBuffer);
+        serializeResponse(*state.response, state.resBuffer);
       }
       while(1) {
         int n = send(
@@ -2325,7 +2343,7 @@ namespace SimpleHTTP {
           state.resBuffer.cstrAfterCursor(),
           state.resBuffer.sizeAfterCursor(), 0
         );
-        if (n < 0) {
+        if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Skip if no data is available to read
             return true;
@@ -2357,7 +2375,7 @@ namespace SimpleHTTP {
      * Unlike the deserialization function, this will serialize the full response into the buffer
      * at once.
      */
-    void SerializeResponse(Response &response, internal::Buffer &buffer) {
+    void serializeResponse(Response &response, internal::Buffer &buffer) {
       // Initialize buffer with status line 
       buffer =
         format(
