@@ -1734,13 +1734,6 @@ namespace SimpleHTTP {
           )
         );
       }
-
-      // Defines the base connection event
-      // This event is copied, edited and used as input for epoll_ctl syscall
-      // to register new connection events
-      // It defines the default events connections are interested in
-      struct epoll_event conBaseEvent;
-      conBaseEvent.events = EPOLLIN | EPOLLOUT;
       
       // Buffer with list of connection events
       // This is used by the epoll instance to insert the events on every loop
@@ -1815,7 +1808,7 @@ namespace SimpleHTTP {
 
             // Initialize connection
             // If connection was not established correctly, it is skipped
-            auto conState = InitializeConnection(epollSocket, conEvents[i], conBaseEvent);
+            auto conState = InitializeConnection(epollSocket, conEvents[i]);
             if (conState.has_value()) {
               // Copied because conSocket is moved before map[] overloader
               int conSockfd = conState.value().fd.getfd();
@@ -1841,6 +1834,12 @@ namespace SimpleHTTP {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
               conStateMap.erase(conStateIter);
             };
+
+            // Update epoll interest for the connection, if false is returned, connection is cleaned up
+            if (!UpdateEventInterest(epollSocket, conEvents[i], conStateIter->second.stage)) {
+              // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
+              conStateMap.erase(conStateIter);
+            };            
           }
         }
       }
@@ -1895,8 +1894,7 @@ namespace SimpleHTTP {
      */
     optional<internal::ConnectionState> InitializeConnection(
       internal::FileDescriptor &epollSocket,
-      struct epoll_event &event,
-      struct epoll_event &baseEvent) {
+      struct epoll_event &event) {
 
       // Prepare accept() attributes
       struct sockaddr conSockAddr = coreSockAddr;
@@ -1906,8 +1904,9 @@ namespace SimpleHTTP {
       // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
       internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
       if (conSocket.getfd() > 0) {
-        // Copy options from base event
-        struct epoll_event conEvent = baseEvent;
+        // Create conEvent with EPOLLIN interest
+        struct epoll_event conEvent;
+        conEvent.events = EPOLLIN;
         // Add custom fd to identify the connection
         conEvent.data.fd = conSocket.getfd();
         // Add connection to list of interest on epoll instance
@@ -1982,6 +1981,53 @@ namespace SimpleHTTP {
         break;
       }
       return true;
+    }
+
+    /**
+     * Updates the epoll event interest for a connection based on the stage of the connection
+     *
+     * Modifies the event interest list using epoll_ctl.
+     * This is crucial to prevent triggering events which are not needed.
+     * (e.g. EPOLLOUT event is almost always triggered, but only used while responding)
+     *
+     * Returns false if the connection should be closed
+     */
+    bool UpdateEventInterest(
+      internal::FileDescriptor &epollSocket,
+      struct epoll_event &event,
+      internal::Stage &stage) {
+
+      // Switch stages based on their interest (EPOLLIN/EPOLLOUT)
+      switch (stage) {
+      case internal::Stage::REQ:
+      case internal::Stage::FUNC_BODY:
+      case internal::Stage::CLEANUP:
+        // If event listener is already set to EPOLLIN, skip the modification
+        if (event.events & EPOLLIN) return true;
+        // Set event to EPOLLIN
+        event.events = EPOLLIN;
+        break;
+      case internal::Stage::RES:
+        // If event listener is already set to EPOLLOUT, skip the modification
+        if (event.events & EPOLLOUT) return true;
+        // Set event to EPOLLOUT
+        event.events = EPOLLOUT;
+        break;
+      default:
+        // If stage does not involve direct calls from event loop, skip the modification
+        return true;
+      }
+
+      // Modify the updated epoll_event
+      int res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_MOD, event.data.fd, &event);
+      if (res<0) {
+        // When the main-loop runs with a misconfigured event (e.g. EPOLLOUT if EPOLLIN is expected)
+        // this will lead to performance starvation immediately, to prevent this, the connection is closed
+        // without further handling etc.
+        return false;
+      } else {
+        return true;
+      }
     }
     
     /**
