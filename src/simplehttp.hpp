@@ -56,471 +56,458 @@
 // Lib only available on Linux systems
 #include <sys/epoll.h>
 
-
 using namespace std;
 
 namespace fs = filesystem;
 
-namespace SimpleHTTP {
+/**
+ * Namespace declared for internal helper / supporter functions & classes
+ */ 
+namespace SimpleHTTP::internal::helper {
 
-  // Namespace declared for internal helper / supporter functions & classes
-  namespace internal {
-
-    /**
-     * RAII compatible and threadsafe filedescriptor wrapper
-     *
-     * - This wrapper will close the filedescriptor automatically on destruction
-     * - All operations performed are fully thread-safe
-     */
-    class FileDescriptor {
-    public:
-      // Default constructor puts descriptor into invalid state (-1)
-      FileDescriptor() : fd(-1) {};
+  /**
+   * RAII compatible and threadsafe filedescriptor wrapper
+   *
+   * - This wrapper will close the filedescriptor automatically on destruction
+   * - All operations performed are fully thread-safe
+   */
+  class FileDescriptor {
+  public:
+    // Default constructor puts descriptor into invalid state (-1)
+    FileDescriptor() : fd(-1) {};
     
-      FileDescriptor(int fd) : fd(fd) {};
-      // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
-      FileDescriptor(FileDescriptor&& other) {
-        // Lock other descriptor lock
+    FileDescriptor(int fd) : fd(fd) {};
+    // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
+    FileDescriptor(FileDescriptor&& other) {
+      // Lock other descriptor lock
+      lock_guard<mutex> otherLock(other.fd_mut);
+      fd = other.fd.exchange(-1);
+    };
+    // Copy constructor is deleted, socket cannot be copied
+    FileDescriptor(const FileDescriptor&) noexcept = delete;
+    
+    // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior    
+    FileDescriptor& operator=(FileDescriptor&& other) {
+      if (this != &other) {
+        // Lock both descriptor locks
+        lock_guard<mutex> localLock(fd_mut);
         lock_guard<mutex> otherLock(other.fd_mut);
-        fd = other.fd.exchange(-1);
-      };
-      // Copy constructor is deleted, socket cannot be copied
-      FileDescriptor(const FileDescriptor&) noexcept = delete;
-    
-      // Move assignment sets descriptor to -1 so that close() will not lead to undefined behavior    
-      FileDescriptor& operator=(FileDescriptor&& other) {
-        if (this != &other) {
-          // Lock both descriptor locks
-          lock_guard<mutex> localLock(fd_mut);
-          lock_guard<mutex> otherLock(other.fd_mut);
-          // Atomically set local fd to other fd and set other fd to -1
-          int newfd = other.fd.exchange(-1);
-          int oldfd = fd.exchange(newfd);
-          // If new fd is not the same as the old fd, close the old
-          if (oldfd!=newfd) {
-            close(oldfd);
-          }
+        // Atomically set local fd to other fd and set other fd to -1
+        int newfd = other.fd.exchange(-1);
+        int oldfd = fd.exchange(newfd);
+        // If new fd is not the same as the old fd, close the old
+        if (oldfd!=newfd) {
+          close(oldfd);
         }
-        return *this;
-      };
-      // Copy assignment is deleted, socket cannot be copied
-      FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
+      }
+      return *this;
+    };
+    // Copy assignment is deleted, socket cannot be copied
+    FileDescriptor& operator=(const FileDescriptor&) noexcept = delete;
     
-      ~FileDescriptor() {
-        // Lock to prevent race condition on writes
-        lock_guard<mutex> lock(fd_mut);
-        // Close socket
-        close(fd);
-      };
-
-      bool operator==(const FileDescriptor& other) {
-        return this->getfd() == other.getfd();
-      };
-
-      /**
-       * Returns filedescriptor
-       */
-      int getfd() const noexcept {
-        return fd;
-      }
-
-      /**
-       * Closes filedescriptor manually
-       */
-      void closefd() {
-        // Lock to prevent race condition on writes
-        lock_guard<mutex> lock(fd_mut);
-        // Close socket
-        close(fd);
-        // Invalidate descriptor
-        fd = -1;
-      }
-    private:
-      // Filedescriptor number
-      // Atomic value is used in order to omit a full mutex lock on every read operation
-      atomic<int> fd;
-      // Mutex lock
-      // Lock is used for write operations at the filedescriptor number
-      // The implementation of this lock may seem a bit overcomplex for the current use case
-      // but if more writer functions are implemented in the future, it will be crucial.
-      mutex fd_mut;
+    ~FileDescriptor() {
+      // Lock to prevent race condition on writes
+      lock_guard<mutex> lock(fd_mut);
+      // Close socket
+      close(fd);
     };
 
-    
-
-    /**
-     * Stage defines various stages for a http connection
-     */
-    enum Stage {
-      REQ, // Request must be handled
-      RES, // Response must be handled
-      CLEANUP, // Connection must be cleaned up for reuse
-      FUNC_INIT, // User defined function must be initialized
-      FUNC_PROC, // User defined function must be processed
-      FUNC_BODY, // Function blocks and body must be handled
+    bool operator==(const FileDescriptor& other) {
+      return this->getfd() == other.getfd();
     };
 
+    /**
+     * Returns filedescriptor
+     */
+    int getfd() const noexcept {
+      return fd;
+    }
 
     /**
-     * String wrapper providing head and rollback cursor for efficient parsing
+     * Closes filedescriptor manually
      */
-    class Buffer {
-    public:
-      Buffer() {};
-      
-      /**
-       * Initialize buffer, move other buffer data and reset cursor
-       */
-      Buffer(Buffer&& other) noexcept : buffer(std::move(other.buffer)),
-                                        headCursor(-1),
-                                        rollbackCursor(-1) {}
-      /**
-       * Initialize buffer, copy other buffer data and reset cursor
-       */
-      Buffer(const Buffer& other) noexcept : buffer(other.buffer),
-                                             headCursor(-1),
-                                             rollbackCursor(-1) {}
+    void closefd() {
+      // Lock to prevent race condition on writes
+      lock_guard<mutex> lock(fd_mut);
+      // Close socket
+      close(fd);
+      // Invalidate descriptor
+      fd = -1;
+    }
+  private:
+    // Filedescriptor number
+    // Atomic value is used in order to omit a full mutex lock on every read operation
+    atomic<int> fd;
+    // Mutex lock
+    // Lock is used for write operations at the filedescriptor number
+    // The implementation of this lock may seem a bit overcomplex for the current use case
+    // but if more writer functions are implemented in the future, it will be crucial.
+    mutex fd_mut;
+  };
 
-      /**
-       * Assignes new buffer to object and resets cursors
-       */
-      Buffer& operator=(Buffer&& other) noexcept {
-        if (this!=&other) {
-          buffer = std::move(other.buffer);
-          headCursor = -1;
-          rollbackCursor = -1;
-        }
-        return *this;
-      }
 
-      /**
-       * Assignes new buffer to object and resets cursors
-       */
-      Buffer& operator=(const Buffer& other) noexcept {
-        if (this!=&other) {
-          buffer = other.buffer;
-          headCursor = -1;
-          rollbackCursor = -1;
-        }
-        return *this;
-      }
+  /**
+   * String wrapper providing head and rollback cursor for efficient parsing
+   */
+  class Buffer {
+  public:
+    Buffer() {};
       
-      /**
-       * Assignes new string to buffer and resets cursors
-       */
-      Buffer& operator=(const string& other) {
-        buffer = other;
+    /**
+     * Initialize buffer, move other buffer data and reset cursor
+     */
+    Buffer(Buffer&& other) noexcept : buffer(std::move(other.buffer)),
+                                      headCursor(-1),
+                                      rollbackCursor(-1) {}
+    /**
+     * Initialize buffer, copy other buffer data and reset cursor
+     */
+    Buffer(const Buffer& other) noexcept : buffer(other.buffer),
+                                           headCursor(-1),
+                                           rollbackCursor(-1) {}
+
+    /**
+     * Assignes new buffer to object and resets cursors
+     */
+    Buffer& operator=(Buffer&& other) noexcept {
+      if (this!=&other) {
+        buffer = std::move(other.buffer);
         headCursor = -1;
         rollbackCursor = -1;
-        return *this;
       }
+      return *this;
+    }
 
-      /**
-       * Assignes new cstring to buffer and resets cursors
-       */
-      Buffer& operator=(const char* other) {
-        buffer = other;
+    /**
+     * Assignes new buffer to object and resets cursors
+     */
+    Buffer& operator=(const Buffer& other) noexcept {
+      if (this!=&other) {
+        buffer = other.buffer;
         headCursor = -1;
         rollbackCursor = -1;
-        return *this;
       }
+      return *this;
+    }
+      
+    /**
+     * Assignes new string to buffer and resets cursors
+     */
+    Buffer& operator=(const string& other) {
+      buffer = other;
+      headCursor = -1;
+      rollbackCursor = -1;
+      return *this;
+    }
 
-      /**
-       * Increments string
-       *
-       * This will not modify the cursors
-       */
-      Buffer& operator+=(const string& other) {
-        buffer += other;
-        return *this;
-      }
+    /**
+     * Assignes new cstring to buffer and resets cursors
+     */
+    Buffer& operator=(const char* other) {
+      buffer = other;
+      headCursor = -1;
+      rollbackCursor = -1;
+      return *this;
+    }
 
-      /**
-       * Increments string
-       *
-       * This will not modify the cursors
-       */
-      Buffer& operator+=(const char* other) {
-        buffer += other;
-        return *this;
-      }
+    /**
+     * Increments string
+     *
+     * This will not modify the cursors
+     */
+    Buffer& operator+=(const string& other) {
+      buffer += other;
+      return *this;
+    }
+
+    /**
+     * Increments string
+     *
+     * This will not modify the cursors
+     */
+    Buffer& operator+=(const char* other) {
+      buffer += other;
+      return *this;
+    }
 
       
-      /**
-       * Get char at head cursor position
-       *
-       * If cursor is -1 nullopt is returned
-       */
-      optional<char> current() {
-        if (headCursor>-1)
-          return buffer[headCursor];
-        else
-          return nullopt;
-      }
+    /**
+     * Get char at head cursor position
+     *
+     * If cursor is -1 nullopt is returned
+     */
+    optional<char> current() {
+      if (headCursor>-1)
+        return buffer[headCursor];
+      else
+        return nullopt;
+    }
       
-      /**
-       * Increment head cursor and get char at new position
-       *
-       * If cursor is out of bound (no more data is on the buffer) nullopt is returned
-       * Cursor is not incremented if the next cursor would be out of bound
-       */
-      optional<char> next() {
-        int nextCursor = headCursor+1;
-        if (nextCursor<int(buffer.size()))
-          return buffer[headCursor=nextCursor];
-        else
-          return nullopt;
-      }
+    /**
+     * Increment head cursor and get char at new position
+     *
+     * If cursor is out of bound (no more data is on the buffer) nullopt is returned
+     * Cursor is not incremented if the next cursor would be out of bound
+     */
+    optional<char> next() {
+      int nextCursor = headCursor+1;
+      if (nextCursor<int(buffer.size()))
+        return buffer[headCursor=nextCursor];
+      else
+        return nullopt;
+    }
 
-      /**
-       * Rollback head cursor to latest commit (or -1 if there was no commit)
-       */
-      Buffer& rollback() {
-        headCursor = rollbackCursor;
-        return *this;
-      }
+    /**
+     * Rollback head cursor to latest commit (or -1 if there was no commit)
+     */
+    Buffer& rollback() {
+      headCursor = rollbackCursor;
+      return *this;
+    }
 
-      /**
-       * Create commit point
-       *
-       * Sets rollback cursor to head cursor
-       */
-      Buffer& commit() {
-        rollbackCursor = headCursor;
-        return *this;
-      }
+    /**
+     * Create commit point
+     *
+     * Sets rollback cursor to head cursor
+     */
+    Buffer& commit() {
+      rollbackCursor = headCursor;
+      return *this;
+    }
 
-      /**
-       * Set head cursor to -1
-      */
-      Buffer& reset() {
-        headCursor = -1;
-        return *this;
-      }
+    /**
+     * Set head cursor to -1
+     */
+    Buffer& reset() {
+      headCursor = -1;
+      return *this;
+    }
 
-      /**
-       * Set head cursor to position. If pos is out of range, false is returned
-       * and the cursor is not changed
-       */
-      bool set(int newpos) {
-        if (newpos<int(buffer.size()) && newpos>=-1) {
-          headCursor = newpos;
-          return true;
-        } else
-          return false;
-      }
+    /**
+     * Set head cursor to position. If pos is out of range, false is returned
+     * and the cursor is not changed
+     */
+    bool set(int newpos) {
+      if (newpos<int(buffer.size()) && newpos>=-1) {
+        headCursor = newpos;
+        return true;
+      } else
+        return false;
+    }
 
-      /**
-       * Increment head cursor by the specified amount. If the cursor is out of range, false is returned
-       * and the cursor is not changed
-       */
-      bool increment(int update) {
-        int nextCursor = headCursor+update;
-        if (nextCursor<int(buffer.size()) && nextCursor>=-1) {
-          headCursor = nextCursor;
-          return true;
-        } else
-          return false;
-      }
+    /**
+     * Increment head cursor by the specified amount. If the cursor is out of range, false is returned
+     * and the cursor is not changed
+     */
+    bool increment(int update) {
+      int nextCursor = headCursor+update;
+      if (nextCursor<int(buffer.size()) && nextCursor>=-1) {
+        headCursor = nextCursor;
+        return true;
+      } else
+        return false;
+    }
       
-      /**
-       * Returns wheter the buffer from index 0 is empty
-       */
-      bool empty() {
-        return buffer.empty();
-      }
+    /**
+     * Returns wheter the buffer from index 0 is empty
+     */
+    bool empty() {
+      return buffer.empty();
+    }
 
-      /**
-       * Insert a array of unsigned chars to the end of the buffer
-       */
-      Buffer& insert(unsigned char* begin, unsigned char* end) {
-        buffer.insert(buffer.end(), begin, end);
-        return *this;
-      }
+    /**
+     * Insert a array of unsigned chars to the end of the buffer
+     */
+    Buffer& insert(unsigned char* begin, unsigned char* end) {
+      buffer.insert(buffer.end(), begin, end);
+      return *this;
+    }
 
-      /**
-       * Insert a array of unsigned chars to the end of the buffer
-       */
-      Buffer& insert(const char* begin, const char* end) {
-        buffer.insert(buffer.end(), begin, end);
-        return *this;
-      }
+    /**
+     * Insert a array of unsigned chars to the end of the buffer
+     */
+    Buffer& insert(const char* begin, const char* end) {
+      buffer.insert(buffer.end(), begin, end);
+      return *this;
+    }
       
-      /**
-       * Get reference to underlying cstring from index 0
-       *
-       * Note that regular C-style operations will not work as expected if the underlying data
-       * is not strictly string data (if it can contain \0)
-       */
-      const char* cstr() {
-        return buffer.c_str();
-      }
+    /**
+     * Get reference to underlying cstring from index 0
+     *
+     * Note that regular C-style operations will not work as expected if the underlying data
+     * is not strictly string data (if it can contain \0)
+     */
+    const char* cstr() {
+      return buffer.c_str();
+    }
 
-      /**
-       * Get copy of the underlying string from index 0
-       */
-      string str() {
-        return buffer;
-      }
+    /**
+     * Get copy of the underlying string from index 0
+     */
+    string str() {
+      return buffer;
+    }
 
-      /**
-       * Get copy of the underlying data from index 0
-       */
-      vector<unsigned char> vec() {
+    /**
+     * Get copy of the underlying data from index 0
+     */
+    vector<unsigned char> vec() {
+      return vector<unsigned char>(buffer.begin(), buffer.end());
+    }
+
+    /**
+     * Returns the size of the buffer from index 0
+     */
+    int size() {
+      return buffer.size();
+    }
+
+    /**
+     * Get reference to underlying cstring from the head cursor
+     *
+     * Note that regular C-style operations will not work as expected if the underlying data
+     * is not strictly string data (if it can contain \0)
+     *
+     * If cursor is on -1 the 0-index ptr is returned
+     */
+    const char* cstrAfterCursor() {
+      if (headCursor>-1)
+        return &buffer[headCursor];
+      else
+        return &buffer[0];
+    }
+
+    /**
+     * Get copy of the underlying string from the head cursor (head cursor included)
+     *
+     * If cursor is on -1 the string from 0 to end is returned
+     */
+    string strAfterCursor() {
+      if (headCursor>-1)
+        return string(buffer.begin()+headCursor, buffer.end());
+      else
+        return string(buffer.begin(), buffer.end());
+    }
+
+    /**
+     * Get copy of the underlying string from index 0 to head cursor (head cursor included)
+     *
+     * If cursor is on -1 an empty string is returned
+     */
+    string strBeforeCursor() {
+      if (headCursor>-1)
+        return string(buffer.begin(), buffer.begin()+headCursor+1);
+      else
+        return "";
+    }
+
+    /**
+     * Get copy of the underlying data from the head cursor (head cursor included)
+     *
+     * If cursor is on -1 the data from 0 to end is returned
+     */
+    vector<unsigned char> vecAfterCursor() {
+      if (headCursor>-1)
+        return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
+      else
         return vector<unsigned char>(buffer.begin(), buffer.end());
-      }
+    }
 
-      /**
-       * Returns the size of the buffer from index 0
-       */
-      int size() {
-        return buffer.size();
-      }
+    /**
+     * Get copy of the underlying data from index 0 to head cursor (head cursor included)
+     *
+     * If cursor is on -1 an empty array is returned
+     */
+    vector<unsigned char> vecBeforeCursor() {
+      if (headCursor>-1)
+        return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor+1);
+      else
+        return {};
+    }
 
-      /**
-       * Get reference to underlying cstring from the head cursor
-       *
-       * Note that regular C-style operations will not work as expected if the underlying data
-       * is not strictly string data (if it can contain \0)
-       *
-       * If cursor is on -1 the 0-index ptr is returned
-       */
-      const char* cstrAfterCursor() {
-        if (headCursor>-1)
-          return &buffer[headCursor];
-        else
-          return &buffer[0];
-      }
+    /**
+     * Erases the buffer from index 0 to head cursor (head cursor included)
+     *
+     * This will also move the head cursor to -1 and commit this change
+     * (after the operation the cursor is essentially on the same element as before)
+     *
+     * Incrementing the offset will make it erase more data of the right side of the cursor
+     *
+     * If cursor is on -1 (after offset is applied) data is erased from 0 to 0 (no data is erased)
+     */
+    Buffer& eraseBeforeCursor(uint offset=0) {
+      // Create the index, up to which the data will be erased
+      int index = headCursor+offset;
+      // Check if in lower bounds
+      if (index<0)
+        // If cursor is on -1 and no offset is applied index is capped to 0
+        index = 0;
+      // Check if in upper bounds
+      if (index>int(buffer.size()))
+        // If size exceeded, cap index to buffer size
+        index = buffer.size();
+      // Erase data
+      buffer.erase(buffer.begin(), buffer.begin()+index+1);
+      // Set and commit cursor to 0
+      set(-1);
+      commit();
+      return *this;
+    }
 
-      /**
-       * Get copy of the underlying string from the head cursor (head cursor included)
-       *
-       * If cursor is on -1 the string from 0 to end is returned
-       */
-      string strAfterCursor() {
-        if (headCursor>-1)
-          return string(buffer.begin()+headCursor, buffer.end());
-        else
-          return string(buffer.begin(), buffer.end());
-      }
-
-      /**
-       * Get copy of the underlying string from index 0 to head cursor (head cursor included)
-       *
-       * If cursor is on -1 an empty string is returned
-       */
-      string strBeforeCursor() {
-        if (headCursor>-1)
-          return string(buffer.begin(), buffer.begin()+headCursor+1);
-        else
-          return "";
-      }
-
-      /**
-       * Get copy of the underlying data from the head cursor (head cursor included)
-       *
-       * If cursor is on -1 the data from 0 to end is returned
-       */
-      vector<unsigned char> vecAfterCursor() {
-        if (headCursor>-1)
-          return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
-        else
-          return vector<unsigned char>(buffer.begin(), buffer.end());
-      }
-
-      /**
-       * Get copy of the underlying data from index 0 to head cursor (head cursor included)
-       *
-       * If cursor is on -1 an empty array is returned
-       */
-      vector<unsigned char> vecBeforeCursor() {
-        if (headCursor>-1)
-          return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor+1);
-        else
-          return {};
-      }
-
-      /**
-       * Erases the buffer from index 0 to head cursor (head cursor included)
-       *
-       * This will also move the head cursor to -1 and commit this change
-       * (after the operation the cursor is essentially on the same element as before)
-       *
-       * Incrementing the offset will make it erase more data of the right side of the cursor
-       *
-       * If cursor is on -1 (after offset is applied) data is erased from 0 to 0 (no data is erased)
-       */
-      Buffer& eraseBeforeCursor(uint offset=0) {
-        // Create the index, up to which the data will be erased
-        int index = headCursor+offset;
-        // Check if in lower bounds
-        if (index<0)
-          // If cursor is on -1 and no offset is applied index is capped to 0
-          index = 0;
-        // Check if in upper bounds
-        if (index>int(buffer.size()))
-          // If size exceeded, cap index to buffer size
-          index = buffer.size();
-        // Erase data
-        buffer.erase(buffer.begin(), buffer.begin()+index+1);
-        // Set and commit cursor to 0
-        set(-1);
-        commit();
-        return *this;
-      }
-
-      /**
-       * Erases the buffer from head cursor (head cursor included)
-       *
-       * This will also move the head cursor one position back and commit this change
-       * (after the operation the cursor is at the last valid element in the buffer)
-       *
-       * Incrementing the offset will make it erase more data of the left side of the cursor
-       *
-       * If cursor is on -1 (or gets there by incrementing the offset) data is erased from 0 to end
-       */
-      Buffer& eraseAfterCursor(uint offset=0) {
-        // Create the index, after which the data will be erased
-        int index = headCursor-offset;
-        // Check if in bounds
-        if (index>0)
-          // If size exceeded, cap index to 0
-          index = 0;
-        buffer.erase(buffer.begin()+index, buffer.end());
-        // Set cursor to last element
-        set(buffer.size()-1);
-        commit();
-        return *this;
-      }
+    /**
+     * Erases the buffer from head cursor (head cursor included)
+     *
+     * This will also move the head cursor one position back and commit this change
+     * (after the operation the cursor is at the last valid element in the buffer)
+     *
+     * Incrementing the offset will make it erase more data of the left side of the cursor
+     *
+     * If cursor is on -1 (or gets there by incrementing the offset) data is erased from 0 to end
+     */
+    Buffer& eraseAfterCursor(uint offset=0) {
+      // Create the index, after which the data will be erased
+      int index = headCursor-offset;
+      // Check if in bounds
+      if (index>0)
+        // If size exceeded, cap index to 0
+        index = 0;
+      buffer.erase(buffer.begin()+index, buffer.end());
+      // Set cursor to last element
+      set(buffer.size()-1);
+      commit();
+      return *this;
+    }
       
-      /**
-       * Returns the size of the buffer from the head cursor (head cursor included)
-       *
-       * If cursor is on -1 the size the size of the full buffer (akin to size())
-       */
-      int sizeAfterCursor() {
-        if (headCursor>-1)
-          return buffer.size() - headCursor;
-        else
-          return buffer.size();
-      }
+    /**
+     * Returns the size of the buffer from the head cursor (head cursor included)
+     *
+     * If cursor is on -1 the size the size of the full buffer (akin to size())
+     */
+    int sizeAfterCursor() {
+      if (headCursor>-1)
+        return buffer.size() - headCursor;
+      else
+        return buffer.size();
+    }
 
-      /**
-       * Returns the size of the buffer from 0 to head cursor (head cursor included)
-       *
-       * If cursor is on -1 the size is 0
-       */
-      int sizeBeforeCursor() {
-        return headCursor+1;
-      }
+    /**
+     * Returns the size of the buffer from 0 to head cursor (head cursor included)
+     *
+     * If cursor is on -1 the size is 0
+     */
+    int sizeBeforeCursor() {
+      return headCursor+1;
+    }
 
-    private:
-      string buffer;
-      int headCursor = -1;
-      int rollbackCursor = -1;
-    };
-  }
+  private:
+    string buffer;
+    int headCursor = -1;
+    int rollbackCursor = -1;
+  };
+} // namespace SimpleHTTP::internal::helper
 
+
+namespace SimpleHTTP {
   
   /**
    * Generic handle wrapper for coroutine
@@ -627,42 +614,97 @@ namespace SimpleHTTP {
     coroutine_handle<promise_type> coro;
   };
 
+  
+  
   /**
-   * Http Request object retrieved upon successful connection
+   * Abstract HTTP Request object retrieved upon successful connection
    *
-   * This object contains http header information and functions to work with the http body
+   * Contains getter functions to retrieve information about the request
    */
   class Request {
   public:
+    virtual ~Request() {};
+     /**
+     * Get HTTP method (e.g. GET, POST)
+     */
+    virtual string getMethod() const noexcept = 0;
 
-    string getMethod() const noexcept {
+    /**
+     * Get HTTP path/route (e.g. /api/some)
+     */
+    virtual string getPath() const noexcept = 0;
+
+    /**
+     * Get HTTP version (e.g. HTTP/1.1)
+     */
+    virtual string getVersion() const noexcept = 0;
+
+    /**
+     * Get Content-Length header as integer
+     *
+     * If no valid content-length is set, nullopt is returned
+     */
+    virtual optional<int> getContentLength() = 0;
+
+    /**
+     * Get Transfer-Encoding header as list of encodings (e.g. [ gzip, chunked ])
+     *
+     * If no valid transfer-encoding header is set, nullopt is returned
+     */
+    virtual optional<unordered_set<string>> getTransferEncoding() = 0;
+
+    /**
+     * Get a query parameter from the request
+     */
+    virtual optional<string> getQueryParam(string key) = 0;
+
+    /**
+     * Get a header from the request
+     *
+     * Key & value are strictly lowercase
+     */
+    virtual optional<string> getHeader(string key) = 0;
+  };
+} // namespace SimpleHTTP
+
+
+
+namespace SimpleHTTP::internal {
+  
+  /**
+   * Http Request objects internal derivate, implementing getter implementations
+   * and additional members to manipulate the request.
+   */
+  class RequestImpl : SimpleHTTP::Request {
+  public:
+    
+    /**
+     * Get HTTP method (e.g. GET, POST)
+     */
+    string getMethod() const noexcept override {
       return method;
     }
 
-    Request& setMethod(string newmethod) {
-      method = newmethod;
-      return *this;
-    }
-    
-    string getPath() const noexcept {
+    /**
+     * Get HTTP path/route (e.g. /api/some)
+     */
+    string getPath() const noexcept override {
       return path;
     }
 
-    Request& setPath(string newpath) {
-      path = parseQueryParameters(newpath);
-      return *this;
-    }
-
-    string getVersion() const noexcept {
+    /**
+     * Get HTTP version (e.g. HTTP/1.1)
+     */
+    string getVersion() const noexcept override {
       return version;
     }
 
-    Request& setVersion(string newversion) {
-      version = newversion;
-      return *this;
-    }
-
-    optional<int> getContentLength() {
+    /**
+     * Get Content-Length header as integer
+     *
+     * If no valid content-length is set, nullopt is returned
+     */
+    optional<int> getContentLength() override {
       auto it = headers.find("content-length");
       if (it == headers.end()) return nullopt;
 
@@ -674,7 +716,12 @@ namespace SimpleHTTP {
       else return nullopt;
     }
 
-    optional<unordered_set<string>> getTransferEncoding() {
+    /**
+     * Get Transfer-Encoding header as list of encodings (e.g. [ gzip, chunked ])
+     *
+     * If no valid transfer-encoding header is set, nullopt is returned
+     */
+    optional<unordered_set<string>> getTransferEncoding() override {
       auto it = headers.find("transfer-encoding");
       if (it == headers.end()) return nullopt;
 
@@ -686,11 +733,9 @@ namespace SimpleHTTP {
     }
 
     /**
-     * Get a header from the request
-     *
-     * Key & value are strictly lowercase
+     * Get a query parameter from the request
      */
-    optional<string> getHeader(string key) {
+    optional<string> getQueryParam(string key) override {
       auto it = headers.find(key);
       if (it != headers.end()) {
         return it->second;
@@ -699,11 +744,48 @@ namespace SimpleHTTP {
     }
 
     /**
+     * Get a header from the request
+     *
+     * Key & value are strictly lowercase
+     */
+    optional<string> getHeader(string key) override {
+      auto it = headers.find(key);
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    /**
+     * Set HTTP method (e.g. GET, POST) to the request
+     */
+    RequestImpl& setMethod(string newmethod) {
+      method = newmethod;
+      return *this;
+    }
+
+    /**
+     * Set HTTP path to the request
+     */
+    RequestImpl& setPath(string newpath) {
+      path = parseQueryParameters(newpath);
+      return *this;
+    }
+
+    /**
+     * Set HTTP version to the request
+     */
+    RequestImpl& setVersion(string newversion) {
+      version = newversion;
+      return *this;
+    }
+
+    /**
      * Set a header to the request
      *
      * Key & value are converted to lowercase
      */
-    Request& setHeader(string key, string value) {
+    RequestImpl& setHeader(string key, string value) {
       // Key & value are converted tolower
       // in order to properly handle those in the internal structure
       
@@ -719,7 +801,7 @@ namespace SimpleHTTP {
       headers[key] = value;
       return *this;
     }
-    
+
   private:
     // HTTP Method (e.g. Get, Post, etc.)
     string method;
@@ -732,7 +814,31 @@ namespace SimpleHTTP {
     unordered_map<string, string> queries;
     // HTTP headers
     unordered_map<string, string> headers;
+    
+    /**
+     * Parse transfer encoding header into a string set
+     *
+     * Returns tokens parsed as string set
+     */
+    unordered_set<string> parseTransferEncoding(string rawValue) {
+      unordered_set<string> tokens;
+      // Create input stream
+      istringstream iss(rawValue);
+      string currentItem;
+      // Parse Transfer Encodings
+      while (getline(iss, currentItem, ',')) {
+        // Trim off spaces
+        auto start = currentItem.find_first_not_of(" ");
+        auto end = currentItem.find_last_not_of(" ");
+        // Skip if no regular char was found in the item
+        if (start==string::npos || end==string::npos) continue;
+        // Insert slice without spaces 
+        tokens.insert(currentItem.substr(start, end - start + 1));
+      }
+      return tokens;
+    }
 
+    
     /**
      * Parse query parameters from url and insert them to the queries map
      *
@@ -770,68 +876,69 @@ namespace SimpleHTTP {
       }
       return newPath;
     }
+  };
+} // namespace SimpleHTTP::internal
 
-    /**
-     * Parse transfer encoding header into a string set
-     *
-     * Returns tokens parsed as string set
-     */
-    unordered_set<string> parseTransferEncoding(string rawValue) {
-      unordered_set<string> tokens;
-      // Create input stream
-      istringstream iss(rawValue);
-      string currentItem;
-      // Parse Transfer Encodings
-      while (getline(iss, currentItem, ',')) {
-        // Trim off spaces
-        auto start = currentItem.find_first_not_of(" ");
-        auto end = currentItem.find_last_not_of(" ");
-        // Skip if no regular char was found in the item
-        if (start==string::npos || end==string::npos) continue;
-        // Insert slice without spaces 
-        tokens.insert(currentItem.substr(start, end - start + 1));
-      }
-      return tokens;
+
+namespace SimpleHTTP::internal {
+
+  /**
+   * Internal body interface defining functions used for the body not visible to the end user (on Body)
+   *
+   * The reason this interface exists, is to pass it to the
+   * awaitable BodyReader which utilizes those functions
+   */
+  class BodyInternalInterface {
+  public:
+    virtual ~BodyInternalInterface() {}
+    virtual void SetReadRequest(int size, std::vector<unsigned char>* outBuffer) = 0;
+    virtual void ClearReadRequest() = 0;
+  };
+  
+} // namespace SimpleHTTP::internal
+
+
+namespace SimpleHTTP {
+
+  /**
+   * Awaitable structure to schedule read requests
+   */
+  struct BodyReader {
+    internal::BodyInternalInterface& body;
+    int size;
+    vector<unsigned char> outBuffer;
+
+    // Always suspend
+    bool await_ready() const noexcept { return false; }
+
+    // Before suspending a new readRequest is created
+    void await_suspend(coroutine_handle<> h) {
+      body.SetReadRequest(size, &outBuffer);
     }
 
-    
+    // When resuming, reset the request and return the outBuffer
+    vector<unsigned char> await_resume() const {
+      body.ClearReadRequest();
+      return outBuffer;
+    }
   };
 
-
+  /**
+   * Datastructure defining a request to read a certain amount of data from the body
+   */
+  struct BodyReadRequest {
+    int size;
+    vector<unsigned char>* outBuffer;
+  };
 
   /**
    * Abstract body object to dynamically read the HTTP body
    *
    * Provides functions to create a awaitable read request (read() / readAll())
-   *
-   * Provides derived objects to handle data transfer in a non-blocking event loop
    */
   class Body {
   public:
     virtual ~Body() {};
-
-    /**
-     * Awaitable structure to schedule read requests
-     */
-    struct Reader {
-      Body& body;
-      int size;
-      vector<unsigned char> outBuffer;
-
-      // Always suspend
-      bool await_ready() const noexcept { return false; }
-
-      // Before suspending a new readRequest is created
-      void await_suspend(coroutine_handle<> h) {
-        body.request = ReadRequest{size, &outBuffer};
-      }
-
-      // When resuming, reset the request and return the outBuffer
-      vector<unsigned char> await_resume() const {
-        body.request = nullopt;
-        return outBuffer;
-      }
-    };
 
     /**
      * Read a specified amount data from the body
@@ -844,8 +951,46 @@ namespace SimpleHTTP {
      *
      * Returns a vector containing data. If the full body was read an empty vector is returned
      */
-    Reader read(int size) {
-      return Reader{*this, size};
+    virtual BodyReader read(int size) = 0;
+
+    /**
+     * Read all data from the body
+     *
+     * Blocks until every the full body is read
+     *
+     * This function will return an awaitable and schedules reading to the simplehttp event loop.
+     *
+     * Use this function inside a coroutine like this: "auto body = co_await readAll();"
+     *
+     * Returns a vector containing data. If the full body was read an empty vector is returned
+     */
+    virtual BodyReader readAll() = 0;
+  };
+} // namespace SimpleHTTP
+
+
+
+namespace SimpleHTTP::internal {
+  
+  /**
+   * Body objects internal derivate, implementing members to process the ReadRequest from internal eventloop
+   */
+  class BodyImpl : SimpleHTTP::Body {
+  public:
+    
+    /**
+     * Read a specified amount data from the body
+     *
+     * Blocks until every the requested data is read
+     *
+     * This function will return an awaitable and schedules reading to the simplehttp event loop.
+     *
+     * Use this function inside a coroutine like this: "auto body = co_await readAll();"
+     *
+     * Returns a vector containing data. If the full body was read an empty vector is returned
+     */
+    BodyReader read(int size) override {
+      return BodyReader{*this, size};
     }
 
     /**
@@ -859,10 +1004,10 @@ namespace SimpleHTTP {
      *
      * Returns a vector containing data. If the full body was read an empty vector is returned
      */
-    Reader readAll() {
-      return Reader{*this, bodySize};
+    BodyReader readAll() override {
+      return BodyReader{*this, bodySize};
     }
-
+    
     /**
      * Internal function to process the read request in the event loop
      *
@@ -875,59 +1020,43 @@ namespace SimpleHTTP {
      *
      * Don't use this function inside your coroutine.
      */
-    virtual optional<internal::Buffer> drainBody() = 0;
+    virtual optional<internal::helper::Buffer> drainBody() = 0;
 
-    
-    
   protected:
-    Body(
-      internal::FileDescriptor* socket,
+    BodyImpl(
+      internal::helper::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      internal::Buffer initBuffer
-    ) :
-      socket(socket),
-      socketBufferSize(socketBufferSize),
-      bodySize(bodySize),
-      readBuffer(initBuffer)
-    {}
-
-    
-    /**
-     * Datastructure defining a request to read a certain amount of data from the body
-     */
-    struct ReadRequest {
-      int size;
-      vector<unsigned char>* outBuffer;
-    };
+      internal::helper::Buffer initBuffer
+    ) : socket(socket), socketBufferSize(socketBufferSize), bodySize(bodySize), readBuffer(initBuffer) {}
     
     // Socket filedescriptor
-    internal::FileDescriptor* socket;
+    internal::helper::FileDescriptor* socket;
     // Socket buffer size
     int socketBufferSize;
     // Remaining body size (this value is decremented when reading the body)
     int bodySize;
     // Temporary buffer holding the received data
     // Data which is read from the user is erased from this
-    internal::Buffer readBuffer;
+    internal::helper::Buffer readBuffer;
     // Current pending read request
-    optional<ReadRequest> request;
+    optional<BodyReadRequest> request;
   };
 
-
+  
   /**
    * Inherited object to read an HTTP body with a fixed size
    *
    * Overrides functions to handle fixed HTTP bodys (Content-Length: xy)
    */
-  class FixedBody : public Body {
+  class FixedBody : public SimpleHTTP::internal::BodyImpl {
   public:
     FixedBody(
-      internal::FileDescriptor* socket,
+      internal::helper::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      internal::Buffer initBuffer
-    ) : Body(socket, socketBufferSize, bodySize, initBuffer) {}
+      internal::helper::Buffer initBuffer
+    ) : SimpleHTTP::internal::BodyImpl(socket, socketBufferSize, bodySize, initBuffer) {}
     
     /**
      * Reads the body with a fixed size (HTTP Content-Length header is set)
@@ -947,7 +1076,7 @@ namespace SimpleHTTP {
     bool processRequest() override {
       // If no value is in queue return true to continue      
       if (!request.has_value()) return true;
-      ReadRequest req = request.value();
+      BodyReadRequest req = request.value();
       
       // Cap size to body size if size is larger then body
       req.size = req.size>bodySize ? bodySize : req.size;
@@ -1003,12 +1132,12 @@ namespace SimpleHTTP {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<internal::Buffer> drainBody() override {
+    optional<internal::helper::Buffer> drainBody() override {
       while (1) {
         // If body is fully read, return true to complete cleanup
         if (bodySize<=0) {
           // Return empty buffer as we directly read the data
-          return internal::Buffer();
+          return internal::helper::Buffer();
         }
         // Read data into a pseudo buffer
         // Unlike with chunkedBody, the data is not cycling over readBuffer
@@ -1044,9 +1173,9 @@ namespace SimpleHTTP {
   class ChunkedBody : public Body {
   public:
     ChunkedBody(
-      internal::FileDescriptor* socket,
+      internal::helper::FileDescriptor* socket,
       int socketBufferSize,
-      internal::Buffer initBuffer
+      internal::helper::Buffer initBuffer
       // Body size is set to INT_MAX in order that if readAll wants to read all
       // that it reads until the body is fully read
     ) : Body(socket, socketBufferSize, INT_MAX, initBuffer) {}
@@ -1131,7 +1260,7 @@ namespace SimpleHTTP {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<internal::Buffer> drainBody() override {
+    optional<internal::helper::Buffer> drainBody() override {
       while (1) {
         // Process data from buffer
         while(1) {
@@ -1174,7 +1303,7 @@ namespace SimpleHTTP {
 
   private:
     // Buffer holding the decoded data
-    internal::Buffer rawReadBuffer;
+    internal::helper::Buffer rawReadBuffer;
     // Identifier buffer for the parser
     string identifier;
     // Character buffer for the parser
@@ -1430,34 +1559,49 @@ namespace SimpleHTTP {
     // Body represented as string
     string body = "";
   };
+}
+
+namespace SimpleHTTP::internal {
+  /**
+   * Stage defines various stages for a http connection
+   */
+  enum Stage {
+    REQ, // Request must be handled
+    RES, // Response must be handled
+    CLEANUP, // Connection must be cleaned up for reuse
+    FUNC_INIT, // User defined function must be initialized
+    FUNC_PROC, // User defined function must be processed
+    FUNC_BODY, // Function blocks and body must be handled
+  };
+    
+  /**
+   * ConnectionState holds the state of a http connection
+   */
+  struct ConnectionState {
+    // Socket descriptor
+    internal::helper::FileDescriptor fd;
+    // Connection stage
+    Stage stage;
+    // Request buffer
+    internal::helper::Buffer reqBuffer;
+    // Response buffer
+    internal::helper::Buffer resBuffer;
+    // Request object (defaulted to empty Response object)
+    unique_ptr<Request> request = make_unique<Request>();
+    // Body object (abstract, so default initialized to nullptr)
+    unique_ptr<Body> body = nullptr;
+    // Response object (defaulted to empty Response object)
+    unique_ptr<Response> response = make_unique<Response>();
+    // Coroutine (function) frame
+    Task<bool> funcHandle;
+    // Timeout when the connection is killed
+    chrono::system_clock::time_point expirationTime;
+  };
+}
 
 
-  namespace internal {
-    /**
-     * ConnectionState holds the state of a http connection
-     */
-    struct ConnectionState {
-      // Socket descriptor
-      FileDescriptor fd;
-      // Connection stage
-      Stage stage;
-      // Request buffer
-      Buffer reqBuffer;
-      // Response buffer
-      Buffer resBuffer;
-      // Request object (defaulted to empty Response object)
-      unique_ptr<Request> request = make_unique<Request>();
-      // Body object (abstract, so default initialized to nullptr)
-      unique_ptr<Body> body = nullptr;
-      // Response object (defaulted to empty Response object)
-      unique_ptr<Response> response = make_unique<Response>();
-      // Coroutine (function) frame
-      Task<bool> funcHandle;
-      // Timeout when the connection is killed
-      chrono::system_clock::time_point expirationTime;
-    };
-  }
-
+namespace SimpleHTTP {
+  
   /**
    * Server Configuration Object
    *
@@ -1507,7 +1651,7 @@ namespace SimpleHTTP {
       unlink(unixSockPath.c_str());
 
       // Initialize core socket
-      coreSocket = internal::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
+      coreSocket = internal::helper::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -1600,7 +1744,7 @@ namespace SimpleHTTP {
       }
 
       // Initialize core socket
-      coreSocket = internal::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
+      coreSocket = internal::helper::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -1759,7 +1903,7 @@ namespace SimpleHTTP {
       }
 
       // Create epoll instance
-      internal::FileDescriptor epollSocket(epoll_create1(0));
+      internal::helper::FileDescriptor epollSocket(epoll_create1(0));
       if (epollSocket.getfd() < 0) {
         throw runtime_error(
           format(
@@ -1921,7 +2065,7 @@ namespace SimpleHTTP {
     
   private:
     // Core bsd socket
-    internal::FileDescriptor coreSocket;
+    internal::helper::FileDescriptor coreSocket;
     // Socket addr
     struct sockaddr coreSockAddr;
     // Socket flags
@@ -1947,7 +2091,7 @@ namespace SimpleHTTP {
      * Returns nullopt if the connection could not be established
      */
     optional<internal::ConnectionState> InitializeConnection(
-      internal::FileDescriptor &epollSocket,
+      internal::helper::FileDescriptor &epollSocket,
       struct epoll_event &event) {
 
       // Prepare accept() attributes
@@ -1956,7 +2100,7 @@ namespace SimpleHTTP {
       // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
       // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
       // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
-      internal::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
+      internal::helper::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
       if (conSocket.getfd() > 0) {
         // Create conEvent with EPOLLIN interest
         struct epoll_event conEvent;
@@ -2048,7 +2192,7 @@ namespace SimpleHTTP {
      * Returns false if the connection should be closed
      */
     bool UpdateEventInterest(
-      internal::FileDescriptor &epollSocket,
+      internal::helper::FileDescriptor &epollSocket,
       struct epoll_event &event,
       internal::Stage &stage) {
 
@@ -2201,7 +2345,7 @@ namespace SimpleHTTP {
      * Returns false if it needs more data to fully deserialize
      * Parsing errors will lead to an exception
      */
-    bool deserializeRequest(internal::Buffer &buffer, Request &request) {
+    bool deserializeRequest(internal::helper::Buffer &buffer, Request &request) {
       string identifier = "";
       optional<char> c;
 
@@ -2476,7 +2620,7 @@ namespace SimpleHTTP {
      * Unlike the deserialization function, this will serialize the full response into the buffer
      * at once.
      */
-    void serializeResponse(Response &response, internal::Buffer &buffer) {
+    void serializeResponse(Response &response, internal::helper::Buffer &buffer) {
       // Initialize buffer with status line 
       buffer =
         format(

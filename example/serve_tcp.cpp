@@ -1,5 +1,4 @@
 #include <chrono>
-#include <fstream>
 #include <vector>
 
 #include "src/simplehttp.hpp"
