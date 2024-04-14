@@ -27,6 +27,7 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -613,18 +614,72 @@ namespace SimpleHTTP {
     // Main coroutine handle
     coroutine_handle<promise_type> coro;
   };
+} // namespace SimpleHTTP
+  
 
-  
-  
+namespace SimpleHTTP::internal {
+
   /**
-   * Abstract HTTP Request object retrieved upon successful connection
+   * Abstract internal request interface defining members used to manipulate the Request object
    *
-   * Contains getter functions to retrieve information about the request
+   * Not visible to the end user
+   */
+  class RequestInternal {
+  public:
+    virtual ~RequestInternal() {}
+
+    // Some getters are defined here and in the external Request object
+    // 'cause the eventloop needs them to deserialize dynamically based on the values already set
+    
+    /**
+     * Get HTTP method (e.g. GET, POST)
+     */
+    virtual string getMethod() const noexcept = 0;
+
+    /**
+     * Get HTTP path/route (e.g. /api/some)
+     */
+    virtual string getPath() const noexcept = 0;
+
+    /**
+     * Get HTTP version (e.g. HTTP/1.1)
+     */
+    virtual string getVersion() const noexcept = 0;
+    
+    /**
+     * Set HTTP method (e.g. GET, POST) to the request
+     */
+    virtual RequestInternal& setMethod(string newmethod) = 0;
+
+    /**
+     * Set HTTP path to the request
+     */
+    virtual RequestInternal& setPath(string newpath) = 0;
+
+    /**
+     * Set HTTP version to the request
+     */
+    virtual RequestInternal& setVersion(string newversion) = 0;
+
+    /**
+     * Set a header to the request
+     *
+     * Key & value are converted to lowercase
+     */
+    virtual RequestInternal& setHeader(string key, string value) = 0;
+  };
+} // namespace SimpleHTTP::internal
+
+
+namespace SimpleHTTP {
+
+  /**
+   * Abstract external request interface defining members used to inspect the Request object
    */
   class Request {
   public:
     virtual ~Request() {};
-     /**
+    /**
      * Get HTTP method (e.g. GET, POST)
      */
     virtual string getMethod() const noexcept = 0;
@@ -670,12 +725,11 @@ namespace SimpleHTTP {
 
 
 namespace SimpleHTTP::internal {
-  
+
   /**
-   * Http Request objects internal derivate, implementing getter implementations
-   * and additional members to manipulate the request.
+   * Request objects internal derivate, implementing members of the internal and external interfaces
    */
-  class RequestImpl : SimpleHTTP::Request {
+  class RequestImpl : public SimpleHTTP::Request, public SimpleHTTP::internal::RequestInternal {
   public:
     
     /**
@@ -759,7 +813,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP method (e.g. GET, POST) to the request
      */
-    RequestImpl& setMethod(string newmethod) {
+    RequestImpl& setMethod(string newmethod) override {
       method = newmethod;
       return *this;
     }
@@ -767,7 +821,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP path to the request
      */
-    RequestImpl& setPath(string newpath) {
+    RequestImpl& setPath(string newpath) override {
       path = parseQueryParameters(newpath);
       return *this;
     }
@@ -775,7 +829,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP version to the request
      */
-    RequestImpl& setVersion(string newversion) {
+    RequestImpl& setVersion(string newversion) override {
       version = newversion;
       return *this;
     }
@@ -785,7 +839,7 @@ namespace SimpleHTTP::internal {
      *
      * Key & value are converted to lowercase
      */
-    RequestImpl& setHeader(string key, string value) {
+    RequestImpl& setHeader(string key, string value) override {
       // Key & value are converted tolower
       // in order to properly handle those in the internal structure
       
@@ -848,9 +902,9 @@ namespace SimpleHTTP::internal {
      */
     string parseQueryParameters(string path) {
       // Search query indicator
-      int queryPos = path.find('?');
+      auto queryPos = path.find('?');
       // If no query indicator is found, the path is not modified
-      if (queryPos == string::npos) return path;
+      if (queryPos==string::npos) return path;
       // Obtain the new path (query params removed)
       string newPath = path.substr(0, queryPos);
       
@@ -862,7 +916,7 @@ namespace SimpleHTTP::internal {
       // Iterate over every query param (key=value) fragment
       while (getline(queryStream, token, '&')) {
         // Search split character ("=")
-        int splitPos = token.find('=');
+        auto splitPos = token.find('=');
         // If split char not found, the fragment is invalid and skipped
         if (splitPos==string::npos) continue;
 
@@ -883,18 +937,34 @@ namespace SimpleHTTP::internal {
 namespace SimpleHTTP::internal {
 
   /**
-   * Internal body interface defining functions used for the body not visible to the end user (on Body)
+   * Abstract internal body interface defining members used for the body
    *
-   * The reason this interface exists, is to pass it to the
-   * awaitable BodyReader which utilizes those functions
+   * Not visible to the end user
    */
-  class BodyInternalInterface {
+  class BodyInternal {
   public:
-    virtual ~BodyInternalInterface() {}
-    virtual void SetReadRequest(int size, std::vector<unsigned char>* outBuffer) = 0;
-    virtual void ClearReadRequest() = 0;
+    virtual ~BodyInternal() {}
+
+    /**
+     * Set read request to the body
+     */
+    virtual void setReadRequest(int size, std::vector<unsigned char>* outBuffer) = 0;
+    
+    /**
+     * Clear read request from the body
+     */
+    virtual void clearReadRequest() = 0;
+
+    /**
+     * Process the read request in the event loop
+     */
+    virtual bool processRequest() = 0;
+
+    /**
+     * Function to drain the body in the event loop
+     */
+    virtual optional<internal::helper::Buffer> drainBody() = 0;
   };
-  
 } // namespace SimpleHTTP::internal
 
 
@@ -904,7 +974,7 @@ namespace SimpleHTTP {
    * Awaitable structure to schedule read requests
    */
   struct BodyReader {
-    internal::BodyInternalInterface& body;
+    internal::BodyInternal& body;
     int size;
     vector<unsigned char> outBuffer;
 
@@ -913,12 +983,12 @@ namespace SimpleHTTP {
 
     // Before suspending a new readRequest is created
     void await_suspend(coroutine_handle<> h) {
-      body.SetReadRequest(size, &outBuffer);
+      body.setReadRequest(size, &outBuffer);
     }
 
     // When resuming, reset the request and return the outBuffer
     vector<unsigned char> await_resume() const {
-      body.ClearReadRequest();
+      body.clearReadRequest();
       return outBuffer;
     }
   };
@@ -931,8 +1001,9 @@ namespace SimpleHTTP {
     vector<unsigned char>* outBuffer;
   };
 
+  
   /**
-   * Abstract body object to dynamically read the HTTP body
+   * Abstract external body interface defining members used to create a readrequest
    *
    * Provides functions to create a awaitable read request (read() / readAll())
    */
@@ -975,7 +1046,7 @@ namespace SimpleHTTP::internal {
   /**
    * Body objects internal derivate, implementing members to process the ReadRequest from internal eventloop
    */
-  class BodyImpl : SimpleHTTP::Body {
+  class BodyImpl : public SimpleHTTP::Body, public SimpleHTTP::internal::BodyInternal {
   public:
     
     /**
@@ -1007,38 +1078,39 @@ namespace SimpleHTTP::internal {
     BodyReader readAll() override {
       return BodyReader{*this, bodySize};
     }
+
     
     /**
-     * Internal function to process the read request in the event loop
-     *
-     * Don't use this function inside your coroutine.
+     * Set read request to the body
      */
-    virtual bool processRequest() = 0;
-
+    void setReadRequest(int size, std::vector<unsigned char>* outBuffer) override {
+      request = BodyReadRequest{size, outBuffer};
+    }
+    
     /**
-     * Internal function to drain the body in the event loop
-     *
-     * Don't use this function inside your coroutine.
+     * Clear read request from the body
      */
-    virtual optional<internal::helper::Buffer> drainBody() = 0;
-
+    void clearReadRequest() override {
+      request = nullopt;
+    }
+    
   protected:
     BodyImpl(
-      internal::helper::FileDescriptor* socket,
+      helper::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      internal::helper::Buffer initBuffer
+      helper::Buffer initBuffer
     ) : socket(socket), socketBufferSize(socketBufferSize), bodySize(bodySize), readBuffer(initBuffer) {}
     
     // Socket filedescriptor
-    internal::helper::FileDescriptor* socket;
+    helper::FileDescriptor* socket;
     // Socket buffer size
     int socketBufferSize;
     // Remaining body size (this value is decremented when reading the body)
     int bodySize;
     // Temporary buffer holding the received data
     // Data which is read from the user is erased from this
-    internal::helper::Buffer readBuffer;
+    helper::Buffer readBuffer;
     // Current pending read request
     optional<BodyReadRequest> request;
   };
@@ -1049,14 +1121,14 @@ namespace SimpleHTTP::internal {
    *
    * Overrides functions to handle fixed HTTP bodys (Content-Length: xy)
    */
-  class FixedBody : public SimpleHTTP::internal::BodyImpl {
+  class FixedBodyImpl : public SimpleHTTP::internal::BodyImpl {
   public:
-    FixedBody(
-      internal::helper::FileDescriptor* socket,
+    FixedBodyImpl(
+      helper::FileDescriptor* socket,
       int socketBufferSize,
       int bodySize,
-      internal::helper::Buffer initBuffer
-    ) : SimpleHTTP::internal::BodyImpl(socket, socketBufferSize, bodySize, initBuffer) {}
+      helper::Buffer initBuffer
+    ) : BodyImpl(socket, socketBufferSize, bodySize, initBuffer) {}
     
     /**
      * Reads the body with a fixed size (HTTP Content-Length header is set)
@@ -1132,12 +1204,12 @@ namespace SimpleHTTP::internal {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<internal::helper::Buffer> drainBody() override {
+    optional<helper::Buffer> drainBody() override {
       while (1) {
         // If body is fully read, return true to complete cleanup
         if (bodySize<=0) {
           // Return empty buffer as we directly read the data
-          return internal::helper::Buffer();
+          return helper::Buffer();
         }
         // Read data into a pseudo buffer
         // Unlike with chunkedBody, the data is not cycling over readBuffer
@@ -1170,15 +1242,15 @@ namespace SimpleHTTP::internal {
    *
    * Overrides functions to handle chunked HTTP bodys (Transfer-Encoding: chunked)
    */
-  class ChunkedBody : public Body {
+  class ChunkedBodyImpl : public SimpleHTTP::internal::BodyImpl {
   public:
-    ChunkedBody(
-      internal::helper::FileDescriptor* socket,
+    ChunkedBodyImpl(
+      helper::FileDescriptor* socket,
       int socketBufferSize,
-      internal::helper::Buffer initBuffer
+      helper::Buffer initBuffer
       // Body size is set to INT_MAX in order that if readAll wants to read all
       // that it reads until the body is fully read
-    ) : Body(socket, socketBufferSize, INT_MAX, initBuffer) {}
+    ) : BodyImpl(socket, socketBufferSize, INT_MAX, initBuffer) {}
     
     /**
      * Reads the body with transfer encoding "chunked"
@@ -1197,7 +1269,7 @@ namespace SimpleHTTP::internal {
     bool processRequest() override {
       // If no value is in queue return true to continue      
       if (!request.has_value()) return true;
-      ReadRequest req = request.value();
+      BodyReadRequest req = request.value();
       
       while (1) {
         // Process data from buffer
@@ -1260,7 +1332,7 @@ namespace SimpleHTTP::internal {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<internal::helper::Buffer> drainBody() override {
+    optional<helper::Buffer> drainBody() override {
       while (1) {
         // Process data from buffer
         while(1) {
@@ -1303,7 +1375,7 @@ namespace SimpleHTTP::internal {
 
   private:
     // Buffer holding the decoded data
-    internal::helper::Buffer rawReadBuffer;
+    helper::Buffer rawReadBuffer;
     // Identifier buffer for the parser
     string identifier;
     // Character buffer for the parser
@@ -1433,37 +1505,151 @@ namespace SimpleHTTP::internal {
       return true;
     }
   };
+} // namespace SimpleHTTP
+
+
+
+namespace SimpleHTTP::internal {
+    
+  /**
+   * Abstract internal response interface defining members used to inspect the Response object
+   *
+   * Not visible to the end user
+   */
+  class ResponseInternal {
+  public:
+    virtual ~ResponseInternal() {}
+
+    /**
+     * Get HTTP version (e.g. HTTP/1.1)
+     */
+    virtual string getVersion() const noexcept = 0;
+
+    /**
+     * Get HTTP status code (e.g. 200)
+     */
+    virtual uint getStatusCode() const noexcept = 0;
+
+    /**
+     * Get HTTP status reason (e.g. OK)
+     */
+    virtual string getStatusReason() const noexcept = 0;
+
+    /**
+     * Get Content-Type header
+     *
+     * If no valid content-type is set, nullopt is returned
+     */
+    virtual optional<string> getContentType() = 0;
+
+    /**
+     * Get Date header as time_point from response
+     *
+     * If no valid date is set, nullopt is returned
+     */
+    virtual optional<chrono::system_clock::time_point> getDate() = 0;
+
+    /**
+     * Get header from the response
+     */
+    virtual unordered_map<string, string>& getHeaders() = 0;
+
+    /**
+     * Get header to the response
+     *
+     * If header is not present, nullopt is returned
+     */
+    virtual optional<string> getHeader(string key) = 0;
+
+    /**
+     * Get body from the response
+     */
+    virtual string getBody() = 0;
+  };
+} // namespace SimpleHTTP::internal
+
+
+
+namespace SimpleHTTP {
 
   /**
-   * Http Response object used to answer the http request
-   *
-   * This object contains http header information
+   * Abstract external response interface defining members used to manipulate the Response object
    */
   class Response {
   public:
-    string getVersion() const noexcept {
+    /**
+     * Set HTTP status code (e.g. 200)
+     */
+    virtual Response& setStatusCode(uint newstatuscode) = 0;
+    
+    /**
+     * Set HTTP status reason (e.g. OK)
+     */
+    virtual Response& setStatusReason(string newstatusreason) = 0;
+
+    /**
+     * Set Content-Type header
+     */
+    virtual Response& setContentType(string newcontenttype) = 0;
+
+    /**
+     * Set Date header to the response
+     */
+    virtual Response& setDate(chrono::system_clock::time_point newdate) = 0;
+
+    /**
+     * Set header to the response
+     */
+    virtual Response& setHeader(string key, string newvalue) = 0;
+
+    /**
+     * Set Body to the response
+     */
+    virtual Response& setBody(string newbody) = 0;
+
+    /**
+     * Append data to the Body of the response
+     */
+    virtual Response& appendBody(string appendbody) = 0;
+  };
+} // namespace SimpleHTTP
+
+
+namespace SimpleHTTP::internal {
+
+  /**
+   * Response objects internal derivate, implementing members of the internal and external interfaces
+   */
+  class ResponseImpl : public SimpleHTTP::Response, public SimpleHTTP::internal::ResponseInternal {
+  public:
+    
+    /**
+     * Get HTTP version (e.g. HTTP/1.1)
+     */
+    string getVersion() const noexcept override {
       return version;
     }
-    
-    uint getStatusCode() const noexcept {
+
+    /**
+     * Get HTTP status code (e.g. 200)
+     */
+    uint getStatusCode() const noexcept override {
       return statusCode;
     }
-    
-    Response& setStatusCode(uint newstatuscode) {
-      statusCode = newstatuscode;
-      return *this;
-    }
 
-    string getStatusReason() const noexcept {
+    /**
+     * Get HTTP status reason (e.g. OK)
+     */
+    string getStatusReason() const noexcept override {
       return statusReason;
     }
 
-    Response& setStatusReason(string newstatusreason) {
-      statusReason = newstatusreason;
-      return *this;
-    }
-
-    optional<string> getContentType() {
+    /**
+     * Get Content-Type header
+     *
+     * If no valid content-type is set, nullopt is returned
+     */
+    optional<string> getContentType() override {
       auto it = headers.find("Content-Type");
       if (it != headers.end()) {
         return it->second;
@@ -1471,12 +1657,12 @@ namespace SimpleHTTP::internal {
         return nullopt;
     }
 
-    Response& setContentType(string newcontenttype) {
-      headers["Content-Type"] = newcontenttype;
-      return *this;
-    }
-
-    optional<chrono::system_clock::time_point> getDate() {
+    /**
+     * Get Date header as time_point from response
+     *
+     * If no valid date is set, nullopt is returned
+     */
+    optional<chrono::system_clock::time_point> getDate() override {
       auto it = headers.find("Date");
       if (it == headers.end()) {
         return nullopt;
@@ -1497,7 +1683,61 @@ namespace SimpleHTTP::internal {
       }
     }
 
-    Response& setDate(chrono::system_clock::time_point newdate) {
+    /**
+     * Get header from the response
+     */
+    unordered_map<string, string>& getHeaders() override {
+      return headers;
+    }
+
+    /**
+     * Get header to the response
+     *
+     * If header is not present, nullopt is returned
+     */
+    optional<string> getHeader(string key) override {
+      auto it = headers.find(key);
+      if (it != headers.end()) {
+        return it->second;
+      } else
+        return nullopt;
+    }
+
+    /**
+     * Get body from the response
+     */
+    string getBody() override {
+      return body;
+    }
+
+    /**
+     * Set HTTP status code (e.g. 200)
+     */
+    ResponseImpl& setStatusCode(uint newstatuscode) override {
+      statusCode = newstatuscode;
+      return *this;
+    }
+    
+    /**
+     * Set HTTP status reason (e.g. OK)
+     */
+    ResponseImpl& setStatusReason(string newstatusreason) override {
+      statusReason = newstatusreason;
+      return *this;
+    }
+
+    /**
+     * Set Content-Type header
+     */
+    ResponseImpl& setContentType(string newcontenttype) override {
+      headers["Content-Type"] = newcontenttype;
+      return *this;
+    }
+
+    /**
+     * Set Date header to the response
+     */
+    ResponseImpl& setDate(chrono::system_clock::time_point newdate) override {
       // Convert to time_t
       time_t newdate_t = chrono::system_clock::to_time_t(newdate);
       // Convert to GMT
@@ -1510,34 +1750,27 @@ namespace SimpleHTTP::internal {
       return *this;
     }
 
-    unordered_map<string, string>& getHeaders() {
-      return headers;
-    }
-
-    optional<string> getHeader(string key) {
-      auto it = headers.find(key);
-      if (it != headers.end()) {
-        return it->second;
-      } else
-        return nullopt;
-    }
-
-    Response& setHeader(string key, string newvalue) {
+    /**
+     * Set header to the response
+     */
+    ResponseImpl& setHeader(string key, string newvalue) override {
       headers[key] = newvalue;
       return *this;
     }
 
-    string getBody() {
-      return body;
-    }
-
-    Response& setBody(string newbody) {
+    /**
+     * Set Body to the response
+     */
+    ResponseImpl& setBody(string newbody) override {
       body = newbody;
       headers["Content-Length"] = to_string(body.length());
       return *this;
     }
 
-    Response& appendBody(string appendbody) {
+    /**
+     * Append data to the Body of the response
+     */
+    ResponseImpl& appendBody(string appendbody) override {
       body += appendbody;
       headers["Content-Length"] = to_string(body.length());
       return *this;
@@ -1559,9 +1792,13 @@ namespace SimpleHTTP::internal {
     // Body represented as string
     string body = "";
   };
-}
+} // namespace SimpleHTTP::internal
+
+
 
 namespace SimpleHTTP::internal {
+
+  
   /**
    * Stage defines various stages for a http connection
    */
@@ -1579,19 +1816,19 @@ namespace SimpleHTTP::internal {
    */
   struct ConnectionState {
     // Socket descriptor
-    internal::helper::FileDescriptor fd;
+    helper::FileDescriptor fd;
     // Connection stage
     Stage stage;
     // Request buffer
-    internal::helper::Buffer reqBuffer;
+    helper::Buffer reqBuffer;
     // Response buffer
-    internal::helper::Buffer resBuffer;
-    // Request object (defaulted to empty Response object)
-    unique_ptr<Request> request = make_unique<Request>();
-    // Body object (abstract, so default initialized to nullptr)
-    unique_ptr<Body> body = nullptr;
-    // Response object (defaulted to empty Response object)
-    unique_ptr<Response> response = make_unique<Response>();
+    helper::Buffer resBuffer;
+    // Request Implementation object
+    unique_ptr<RequestImpl> request = make_unique<RequestImpl>();
+    // Body object (default initialized to nullptr as there is no default constructor)
+    unique_ptr<BodyImpl> body = nullptr;
+    // Response Implementation object
+    unique_ptr<ResponseImpl> response = make_unique<ResponseImpl>();
     // Coroutine (function) frame
     Task<bool> funcHandle;
     // Timeout when the connection is killed
@@ -1871,7 +2108,11 @@ namespace SimpleHTTP {
      * Func shall NOT perform any blocking IO operation besides those provided by simplehttp.
      * Performing another blocking IO operation will block the whole HTTP server, not just this function!
      */
-    void Route(string method, string route, function<Task<bool>(Request&, Body&, Response&)> func) {
+    void Route(
+      string method,
+      string route,
+      function<Task<bool>(Request&, Body&, Response&)> func) {
+      
       // Convert method toupper
       transform(method.begin(), method.end(), method.begin(),
         [](unsigned char c){ return toupper(c); }
@@ -2319,13 +2560,13 @@ namespace SimpleHTTP {
         if (isChunked)
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // ChunkedBody will interpret data chunked
-          state.body = make_unique<ChunkedBody>(
+          state.body = make_unique<internal::ChunkedBodyImpl>(
             &state.fd, config.sockBufferSize, std::move(state.reqBuffer)
           );
         else
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // FixedBody will interpret data with a fixed length
-          state.body = make_unique<FixedBody>(
+          state.body = make_unique<internal::FixedBodyImpl>(
             &state.fd, config.sockBufferSize, bodySize, std::move(state.reqBuffer)
           );
           
@@ -2345,7 +2586,7 @@ namespace SimpleHTTP {
      * Returns false if it needs more data to fully deserialize
      * Parsing errors will lead to an exception
      */
-    bool deserializeRequest(internal::helper::Buffer &buffer, Request &request) {
+    bool deserializeRequest(internal::helper::Buffer &buffer, internal::RequestInternal &request) {
       string identifier = "";
       optional<char> c;
 
@@ -2620,7 +2861,7 @@ namespace SimpleHTTP {
      * Unlike the deserialization function, this will serialize the full response into the buffer
      * at once.
      */
-    void serializeResponse(Response &response, internal::helper::Buffer &buffer) {
+    void serializeResponse(internal::ResponseInternal &response, internal::helper::Buffer &buffer) {
       // Initialize buffer with status line 
       buffer =
         format(
