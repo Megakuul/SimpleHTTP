@@ -1,4 +1,3 @@
-#include <chrono>
 #include <vector>
 
 #include "src/simplehttp.hpp"
@@ -8,6 +7,8 @@ using namespace std;
 
 vector<string> list;
 
+const string TOKEN = "DontHardcodeMe";
+
 int main(void) {
   // Create a server and optional customize the configuration
   SimpleHTTP::Server server("0.0.0.0", 8080, {
@@ -15,22 +16,8 @@ int main(void) {
     .connectionTimeout = chrono::seconds(60)
   });
 
-  // Create route to generate a random number
-  server.Route("GET", "/time", [](Request &req, Body &body, Response &res) -> Task<bool> {
-    // Acquire current time
-    long now =  chrono::system_clock::now().time_since_epoch().count();
-    // Add body to response object
-    res
-      .setStatusCode(200)
-      .setStatusReason("OK")
-      .setContentType("text/plain")
-      .setBody(to_string(now)+"\n");
-
-    // Close connection after response
-    co_return true;
-  });
-
   // Create route to redirect request
+  // Test with: curl 127.0.0.1:8080/cloudflare -v
   server.Route("GET", "/cloudflare", [](Request &req, Body &body, Response &res) -> Task<bool> {
     // Define response object
     res
@@ -40,38 +27,65 @@ int main(void) {
       .setContentType("text/html")
       .setBody("<h1>Page Moved 301</h1>");
 
-    // Don't close connection after response    
     co_return true;
   });
 
   // Create route to add an element to the list
+  // Test with: curl -X POST -H "Authorization: DontHardcodeMe" -d "Whaazzzzuppp" 127.0.0.1:8080/add -v
   server.Route("POST", "/add", [](Request &req, Body &body, Response &res) -> Task<bool> {
+    // Obtain token from authorization header
+    auto tokenHeader = req.getHeader("authorization");
+    if (!tokenHeader.has_value() || tokenHeader.value()!=TOKEN) {
+      res
+        .setStatusCode(401)
+        .setStatusReason("Unauthorized")
+        .setContentType("text/plain")
+        .setBody("Invalid authorization token provided!\n");
+      
+      co_return true;
+    }
+    
     // Read all data from the body
-    vector<unsigned char> data = co_await body.read(10);
+    vector<unsigned char> data = co_await body.readAll();
+    
     // Insert data into the list
-    list.push_back(string(data.begin(), data.end())+"\n");
+    list.push_back(string(data.begin(), data.end()));
 
-    // Define response object
     res
       .setStatusCode(200)
       .setStatusReason("OK");
 
-    // Don't close connection after response    
     co_return true;
   });
 
   // Create route to read an element from the list
+  // Test with: curl 127.0.0.1:8080/get?index=1 -v
   server.Route("GET", "/get", [](Request &req, Body &body, Response &res) -> Task<bool> {
-    // Fetch top element
-    string item = list.front();
-    // Define response object
-    res
-      .setStatusCode(200)
-      .setStatusReason("OK")
-      .setContentType("text/plain")
-      .setBody(item);
-
-    // Don't close connection after response    
+    try {
+      // Obtain index string from query parameter
+      auto indexParam = req.getQueryParam("index");
+      if (!indexParam.has_value())
+        throw runtime_error("No element index parameter was specified!");
+      
+      // Convert index string to integer
+      int index = stoi(req.getQueryParam("index").value());
+      
+      // Obtain object from vector
+      string item = list.at(index);
+      
+      res
+        .setStatusCode(200)
+        .setStatusReason("OK")
+        .setContentType("text/plain")
+        .setBody(item+"\n");
+    } catch (exception &_) {
+      res
+        .setStatusCode(404)
+        .setStatusReason("Not Found")
+        .setContentType("text/plain")
+        .setBody("Element was not found!\n");
+    }
+    
     co_return true;
   });
   

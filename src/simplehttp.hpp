@@ -664,7 +664,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set a header to the request
      *
-     * Key & value are converted to lowercase
+     * Key is converted to lowercase
      */
     virtual RequestInternal& setHeader(string key, string value) = 0;
   };
@@ -716,7 +716,7 @@ namespace SimpleHTTP {
     /**
      * Get a header from the request
      *
-     * Key & value are strictly lowercase
+     * Key is strictly lowercase
      */
     virtual optional<string> getHeader(string key) = 0;
   };
@@ -790,8 +790,8 @@ namespace SimpleHTTP::internal {
      * Get a query parameter from the request
      */
     optional<string> getQueryParam(string key) override {
-      auto it = headers.find(key);
-      if (it != headers.end()) {
+      auto it = queries.find(key);
+      if (it != queries.end()) {
         return it->second;
       } else
         return nullopt;
@@ -800,7 +800,7 @@ namespace SimpleHTTP::internal {
     /**
      * Get a header from the request
      *
-     * Key & value are strictly lowercase
+     * Key is strictly lowercase
      */
     optional<string> getHeader(string key) override {
       auto it = headers.find(key);
@@ -837,7 +837,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set a header to the request
      *
-     * Key & value are converted to lowercase
+     * Key is converted to lowercase
      */
     RequestImpl& setHeader(string key, string value) override {
       // Key & value are converted tolower
@@ -845,10 +845,6 @@ namespace SimpleHTTP::internal {
       
       // Convert key tolower
       transform(key.begin(), key.end(), key.begin(),
-        [](unsigned char c){ return tolower(c); }
-      );
-      // Convert value tolower
-      transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c){ return tolower(c); }
       );
       // Set kv pair
@@ -907,7 +903,7 @@ namespace SimpleHTTP::internal {
       if (queryPos==string::npos) return path;
       // Obtain the new path (query params removed)
       string newPath = path.substr(0, queryPos);
-      
+
       // Obtain the query param string as input stream
       istringstream queryStream(path.substr(queryPos+1));
 

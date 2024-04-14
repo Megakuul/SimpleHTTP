@@ -46,7 +46,7 @@ Due to the simplicity of SimpleHTTP, there are no unit tests.
 
 #### Naming/Structural concept
 ---
-**Nameing concept**
+**Naming concept**
 
 
 The following name concept is used:
