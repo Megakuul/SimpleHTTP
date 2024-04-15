@@ -11,13 +11,13 @@ const string TOKEN = "DontHardcodeMe";
 
 int main(void) {
   // Create a server and optional customize the configuration
-  SimpleHTTP::Server server("0.0.0.0", 8080, {
+  SimpleHTTP::Server server("/tmp/example.sock", {
     .maxHeaderSize = 4096,
     .connectionTimeout = chrono::seconds(60)
   });
 
   // Create route to redirect request
-  // Test with: curl 127.0.0.1:8080/cloudflare -v
+  // Test with: curl --unix-socket /tmp/example.sock 127.0.0.1/cloudflare -v
   server.Route("GET", "/cloudflare", [](Request &req, Body &body, Response &res) -> Task<bool> {
     // Define response object
     res
@@ -31,7 +31,7 @@ int main(void) {
   });
 
   // Create route to add an element to the list
-  // Test with: curl -X POST -H "Authorization: DontHardcodeMe" -d "Whaazzzzuppp" 127.0.0.1:8080/add -v
+  // Test with: curl -X POST -H "Authorization: DontHardcodeMe" -d "Whaazzzzuppp" --unix-socket /tmp/example.sock 127.0.0.1/add -v
   server.Route("POST", "/add", [](Request &req, Body &body, Response &res) -> Task<bool> {
     // Obtain token from authorization header
     auto tokenHeader = req.getHeader("authorization");
@@ -59,7 +59,7 @@ int main(void) {
   });
 
   // Create route to read an element from the list
-  // Test with: curl 127.0.0.1:8080/get?index=1 -v
+  // Test with: curl --unix-socket /tmp/example.sock 127.0.0.1:8080/get?index=1 -v
   server.Route("GET", "/get", [](Request &req, Body &body, Response &res) -> Task<bool> {
     try {
       // Obtain index string from query parameter
@@ -89,10 +89,9 @@ int main(void) {
     co_return true;
   });
 
-
   // Create route to read dynamically (chunked data encoding), searching for specified char in every chunk
   // This mechanism can be used to read streamed data from a client where the size is not known at send time
-  // Test with: curl -X POST -H "Transfer-Encoding: chunked" 127.0.0.1:8080/find?char=l -d SuperMegakuul -v
+  // Test with: curl -X POST -H "Transfer-Encoding: chunked" --unix-socket /tmp/example.sock 127.0.0.1/find?char=l -d SuperMegakuul -v
   server.Route("POST", "/find", [](Request &req, Body &body, Response &res) -> Task<bool> {
     // Obtain character from query parameter
     auto charParam = req.getQueryParam("char");
@@ -138,7 +137,7 @@ int main(void) {
     co_return true;
   });
 
-  
   // Launch server
   server.Serve();
+  
 }

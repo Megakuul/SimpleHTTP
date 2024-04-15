@@ -439,10 +439,6 @@ namespace SimpleHTTP::internal::helper {
     Buffer& eraseBeforeCursor(uint offset=0) {
       // Create the index, up to which the data will be erased
       int index = headCursor+offset;
-      // Check if in lower bounds
-      if (index<0)
-        // If cursor is on -1 and no offset is applied index is capped to 0
-        index = 0;
       // Check if in upper bounds
       if (index>int(buffer.size()))
         // If size exceeded, cap index to buffer size
@@ -1266,10 +1262,11 @@ namespace SimpleHTTP::internal {
       // If no value is in queue return true to continue      
       if (!request.has_value()) return true;
       BodyReadRequest req = request.value();
-      
+
       while (1) {
         // Process data from buffer
         while(1) {
+          if (nextChunkSize==0) break;
           if (readChunkState) {
             if (!processChunkData()) {
               break;
@@ -1280,10 +1277,13 @@ namespace SimpleHTTP::internal {
             }
           }
         }
-        // Check if readBuffer contains enough data or if the full body was read
+        
+        // Check if rawReadBuffer contains enough data or if the full body was read
         if (rawReadBuffer.size() >= req.size || nextChunkSize==0) {
-          // Set cursor to requested index + 1 (requested size)
-          rawReadBuffer.set(req.size);
+          // Cap req size to rawReadBuffer size if the full body is read (nextChunkSize==0)
+          req.size = req.size > rawReadBuffer.size() ? rawReadBuffer.size() : req.size;
+          // Set cursor to requested index (requested size - 1)
+          rawReadBuffer.set(req.size-1);
           // Copy the requested data (0-requested index) to outBuffer
           *req.outBuffer = rawReadBuffer.vecBeforeCursor();
           // Erase the removed data from the buffer
@@ -1378,8 +1378,8 @@ namespace SimpleHTTP::internal {
     optional<char> c;
     // Determines if currently chunk data is read or if the size is read
     bool readChunkState = false;
-    // Determines the size of the next chunk
-    int nextChunkSize = 0;
+    // Determines the size of the next chunk (-1 = uninitialized, 0 = full body is read, other = size to read)
+    int nextChunkSize = -1;
     // Defines the maximum length of the hexadecimal chunkSize number
     // If the chunkSize number is larger the encoding is considered invalid
     const int maxChunkSizeLength = 5;
@@ -1411,10 +1411,13 @@ namespace SimpleHTTP::internal {
           // Convert identifier into string with stoi on base 16 (hex)
           // If the identifier cannot be converted stoi throws an error
           // this error will be thrown to the caller of processRequest()
-          // which is fine because if the size is not convertable, it is considered invalid encoding
+          // which is fine because if the size is Not convertable, it is considered invalid encoding
           nextChunkSize = stoi(identifier, nullptr, 16);
           readChunkState = true;
           readBuffer.commit();
+          // If nextchunk is 0, it can immediately break out of the loop
+          if (nextChunkSize==0) return false;
+          
           return true;
         }
         identifier+=c.value();
@@ -1432,10 +1435,15 @@ namespace SimpleHTTP::internal {
      * Throws an exception if the input is invalid encoded
      */
     bool processChunkData() {
-      // Check if the readBuffer has enough data for nextChunkSize + CRLF
-      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
+      // Check if the readBuffer has enough data for nextChunkSize + CRLF + Current buffered char
+      if (nextChunkSize+2+1>readBuffer.sizeAfterCursor()) {
         return false;
       }
+
+      // Eat current char (most likely '\n')
+      // As cstrAfterCursor includes the current headCursor, we need to eat the first char
+      // of the actual data into the buffers headCursor
+      readBuffer.next(); // No need for bound check as it is already checked above
 
       // Copy data from readBuffer directly to rawReadBuffer
       rawReadBuffer.insert(
@@ -1443,8 +1451,8 @@ namespace SimpleHTTP::internal {
         readBuffer.cstrAfterCursor()+nextChunkSize
       );
 
-      // Update readBuffer cursor
-      readBuffer.increment(nextChunkSize);
+      // Update readBuffer cursor (-1 because below the current char is eaten by next())
+      readBuffer.increment(nextChunkSize-1);
 
       // Expect CRLF ('\r' & '\n') after chunk (defined in RFC 7230)
       identifier = "";
@@ -1460,7 +1468,9 @@ namespace SimpleHTTP::internal {
 
       // Erase chunk + chunkSize before cursor
       readBuffer.eraseBeforeCursor();
-      
+
+      readChunkState = false;
+
       return true;
     }
 
@@ -1476,11 +1486,11 @@ namespace SimpleHTTP::internal {
      */
     bool skipChunkData() {
       // Check if the readBuffer has enough data for nextChunkSize + CRLF
-      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
+      if (nextChunkSize+2  >readBuffer.sizeAfterCursor()) {
         return false;
       }
 
-      // Update readBuffer cursor
+      // Update readBuffer cursor (including current buffered char (most likely '\n'))
       readBuffer.increment(nextChunkSize);
 
       // Expect CRLF ('\r' & '\n') after chunk (defined in RFC 7230)
@@ -1497,6 +1507,8 @@ namespace SimpleHTTP::internal {
 
       // Erase chunk + chunkSize before cursor
       readBuffer.eraseBeforeCursor();
+
+      readChunkState = false;
       
       return true;
     }
@@ -1830,7 +1842,7 @@ namespace SimpleHTTP::internal {
     // Timeout when the connection is killed
     chrono::system_clock::time_point expirationTime;
   };
-}
+} // namespace SimpleHTTP::internal
 
 
 namespace SimpleHTTP {
@@ -1898,13 +1910,13 @@ namespace SimpleHTTP {
       struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&coreSockAddr;
       // Clean unSockAddr, 'cause maybe some weird libs
       // still expect it to zero out sin_zero (which C++ does not do by def)
-      memset(unSockAddr, 0, sizeof(*unSockAddr));
+      memset(unSockAddr, 0, sizeof(struct sockaddr));
       // Set unSockAddr options
       unSockAddr->sun_family = AF_UNIX;
       strcpy(unSockAddr->sun_path, unixSockPath.c_str());
 
       // Bind unix socket
-      int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
+      int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(struct sockaddr_un));
       if (res < 0) {
         throw runtime_error(
           format(
@@ -1938,7 +1950,7 @@ namespace SimpleHTTP {
           )
         );
       }
-      
+
       // Socket is closed automatically in destructor, because Socket is RAII compatible.
     };
 
@@ -1953,7 +1965,7 @@ namespace SimpleHTTP {
       struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&coreSockAddr;
       // Clean inSockAddr, 'cause maybe some weird libs
       // still expect it to zero out sin_zero (which C++ does not do by def)
-      memset(inSockAddr, 0, sizeof(*inSockAddr));
+      memset(inSockAddr, 0, sizeof(struct sockaddr));
       // Set inSockAddr options
       inSockAddr->sin_family = AF_INET;
       inSockAddr->sin_port = htons(port);
@@ -2034,7 +2046,7 @@ namespace SimpleHTTP {
       }
 
       // Bind socket to specified addr
-      res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(coreSockAddr));
+      res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(struct sockaddr_in));
       if (res < 0) {
         throw runtime_error(
           format(
@@ -2114,7 +2126,6 @@ namespace SimpleHTTP {
         [](unsigned char c){ return toupper(c); }
       );
 
-      // Add method to the route
       routeMap[route][method] = func;
     }
 
@@ -2167,7 +2178,59 @@ namespace SimpleHTTP {
           )
         );
       }
-      
+
+      // Run event loop
+      StartEventLoop(epollSocket);
+    }
+
+
+
+    /**
+     * Kill shuts down the server
+     *
+     * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
+     *
+     * Kill() will essentially close the core socket of the server
+     * This leads to the following events:
+     * - Immediately, new tcp connections to the server are rejected
+     * - Running sessions are closed on tcp level in the next event loop
+     * - The blocking Serve() will exit after next event loop
+     *
+     * Kill is thread-safe.
+     */
+    void Kill() {
+      coreSocket.closefd();
+    }
+
+    
+  private:
+    // Core bsd socket
+    internal::helper::FileDescriptor coreSocket;
+    // Socket addr
+    struct sockaddr coreSockAddr;
+    // Socket flags
+    int sockFlags;
+    // Server configuration
+    ServerConfiguration config;
+    
+    // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
+    // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
+    // with their respective handler functions.
+    unordered_map<string, unordered_map<string, function<Task<bool>(
+      Request&,
+      Body&,
+      Response&
+    )>>> routeMap;
+
+    /**
+     * Initialize and start simplehttp event loop
+     *
+     *
+     * This function blocks until:
+     * - Eventloop was shut down (core socket closed)
+     * - Exception occured
+     */
+    void StartEventLoop(internal::helper::FileDescriptor &epollSocket) {
       // Buffer with list of connection events
       // This is used by the epoll instance to insert the events on every loop
       struct epoll_event conEvents[config.maxEventsPerLoop];
@@ -2278,46 +2341,7 @@ namespace SimpleHTTP {
           }
         }
       }
-    };
-
-
-
-    /**
-     * Kill shuts down the server
-     *
-     * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
-     *
-     * Kill() will essentially close the core socket of the server
-     * This leads to the following events:
-     * - Immediately, new tcp connections to the server are rejected
-     * - Running sessions are closed on tcp level in the next event loop
-     * - The blocking Serve() will exit after next event loop
-     *
-     * Kill is thread-safe.
-     */
-    void Kill() {
-      coreSocket.closefd();
     }
-
-    
-  private:
-    // Core bsd socket
-    internal::helper::FileDescriptor coreSocket;
-    // Socket addr
-    struct sockaddr coreSockAddr;
-    // Socket flags
-    int sockFlags;
-    // Server configuration
-    ServerConfiguration config;
-
-    // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
-    // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
-    // with their respective handler functions.
-    unordered_map<string, unordered_map<string, function<Task<bool>(
-      Request&,
-      Body&,
-      Response&
-    )>>> routeMap;
 
 
     /**
@@ -2932,6 +2956,6 @@ namespace SimpleHTTP {
       }
     }
   };
-}
+} // namespace SimpleHTTP
 
 #endif

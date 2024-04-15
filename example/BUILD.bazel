@@ -4,3 +4,10 @@ cc_binary(
     copts = ["-std=c++23"],
     deps = ["//src:simplehttp"],
 )
+
+cc_binary(
+    name = "serve_unix",
+    srcs = glob(["serve_unix.cpp"]),
+    copts = ["-std=c++23"],
+    deps = ["//src:simplehttp"],
+)
