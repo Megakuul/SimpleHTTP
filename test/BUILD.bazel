@@ -1,13 +1,34 @@
 cc_test(
-    name = "basic_http_tcp",
-    srcs = glob(["basic_http_tcp.cpp"]),
+    name = "start_test_server",
+    srcs = glob(["start_test_server.cpp"]),
     copts = ["-std=c++23"],
     deps = ["//src:simplehttp"],
 )
 
 cc_test(
-    name = "basic_http_unix",
-    srcs = glob(["basic_http_unix.cpp"]),
+    name = "verify_query_params",
+    srcs = glob(["verify_query_params_test.cpp"]),
     copts = ["-std=c++23"],
-    deps = ["//src:simplehttp"],
+    linkopts = ["-lcurl"],
+)
+
+cc_test(
+    name = "verify_headers",
+    srcs = glob(["verify_headers_test.cpp"]),
+    copts = ["-std=c++23"],
+    linkopts = ["-lcurl"],
+)
+
+cc_test(
+    name = "process_fixed_body",
+    srcs = glob(["process_fixed_body_test.cpp"]),
+    copts = ["-std=c++23"],
+    linkopts = ["-lcurl"],
+)
+
+cc_test(
+    name = "process_chunked_body",
+    srcs = glob(["process_chunked_body_test.cpp"]),
+    copts = ["-std=c++23"],
+    linkopts = ["-lcurl"],
 )

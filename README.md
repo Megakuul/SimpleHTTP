@@ -40,6 +40,10 @@ You can also use the examples for testing the application during development.
 In the `test` directory you will find simple end-to-end tests which are used for automated testing.
 
 
+All tests rely on the `curl/curl.h` lib and connect to the test server `//test:start_test_server`.
+
+
+
 Due to the simplicity of SimpleHTTP, there are no unit tests.
 
 

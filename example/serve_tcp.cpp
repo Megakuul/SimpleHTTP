@@ -11,7 +11,7 @@ const string TOKEN = "DontHardcodeMe";
 
 int main(void) {
   // Create a server and optional customize the configuration
-  SimpleHTTP::Server server("0.0.0.0", 8080, {
+  Server server("0.0.0.0", 8080, {
     .maxHeaderSize = 4096,
     .connectionTimeout = chrono::seconds(60)
   });

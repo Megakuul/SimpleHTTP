@@ -2,8 +2,8 @@
 
 #include "src/simplehttp.hpp"
 
-using namespace SimpleHTTP;
 using namespace std;
+using namespace SimpleHTTP;
 
 vector<string> list;
 
@@ -11,7 +11,7 @@ const string TOKEN = "DontHardcodeMe";
 
 int main(void) {
   // Create a server and optional customize the configuration
-  SimpleHTTP::Server server("/tmp/example.sock", {
+  Server server("/tmp/example.sock", {
     .maxHeaderSize = 4096,
     .connectionTimeout = chrono::seconds(60)
   });
