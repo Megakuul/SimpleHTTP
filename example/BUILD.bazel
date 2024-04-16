@@ -3,6 +3,7 @@ cc_binary(
     srcs = glob(["serve_tcp.cpp"]),
     copts = ["-std=c++23"],
     deps = ["//src:simplehttp"],
+    visibility = ["//visibility:private"],
 )
 
 cc_binary(
@@ -10,4 +11,5 @@ cc_binary(
     srcs = glob(["serve_unix.cpp"]),
     copts = ["-std=c++23"],
     deps = ["//src:simplehttp"],
+    visibility = ["//visibility:private"],
 )

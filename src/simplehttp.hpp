@@ -54,8 +54,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 
-// Lib only available on Linux systems
+// Libs only available on Linux systems
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 
 using namespace std;
 
@@ -1286,6 +1287,7 @@ namespace SimpleHTTP::internal {
           rawReadBuffer.set(req.size-1);
           // Copy the requested data (0-requested index) to outBuffer
           *req.outBuffer = rawReadBuffer.vecBeforeCursor();
+          
           // Erase the removed data from the buffer
           rawReadBuffer.eraseBeforeCursor();
           return true;
@@ -1486,7 +1488,7 @@ namespace SimpleHTTP::internal {
      */
     bool skipChunkData() {
       // Check if the readBuffer has enough data for nextChunkSize + CRLF
-      if (nextChunkSize+2  >readBuffer.sizeAfterCursor()) {
+      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
         return false;
       }
 
@@ -2151,8 +2153,8 @@ namespace SimpleHTTP {
       }
 
       // Create epoll instance
-      internal::helper::FileDescriptor epollSocket(epoll_create1(0));
-      if (epollSocket.getfd() < 0) {
+      epollInstance = internal::helper::FileDescriptor(epoll_create1(0));
+      if (epollInstance.getfd() < 0) {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
@@ -2160,16 +2162,14 @@ namespace SimpleHTTP {
           )
         );
       }
-
       // Add core socket to epoll instance
       // This is just used to inform the epoll_ctl which events we are interested in
-      // sock_event is not manipulated by the epoll_ctl syscall
-      struct epoll_event sockEvent;
+      struct epoll_event coreSockEvent;
       // On core socket we are only interested in readable state, there is no need for any writes to it
-      sockEvent.events = EPOLLIN;
-      sockEvent.data.fd = coreSocket.getfd();
+      coreSockEvent.events = EPOLLIN;
+      coreSockEvent.data.fd = coreSocket.getfd();
       
-      res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &sockEvent);
+      res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -2179,8 +2179,37 @@ namespace SimpleHTTP {
         );
       }
 
+      // Create exit event descriptor
+      exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
+      if (exitEvent.getfd() < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create exit eventfd", strerror(errno)
+          )
+        );
+      }
+      // Add exit eventfd to epoll instance
+      // This is just used to inform the epoll_ctl which events we are interested in
+      struct epoll_event exitEventEvent;
+      
+      // On core socket we are only interested in readable state, there is no need for any writes to it
+      exitEventEvent.events = EPOLLIN;
+      exitEventEvent.data.fd = exitEvent.getfd();
+      
+      res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, exitEvent.getfd(), &exitEventEvent);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "add exit eventfd to epoll instance", strerror(errno)
+          )
+        );
+      }
+
+
       // Run event loop
-      StartEventLoop(epollSocket);
+      StartEventLoop();
     }
 
 
@@ -2199,13 +2228,19 @@ namespace SimpleHTTP {
      * Kill is thread-safe.
      */
     void Kill() {
-      coreSocket.closefd();
+      uint64_t increment = 1;
+      write(exitEvent.getfd(), &increment, sizeof(uint64_t));
     }
 
     
   private:
-    // Core bsd socket
+    // Core bsd socket (responsible for establishing connections)
     internal::helper::FileDescriptor coreSocket;
+    // Epoll event instance (responsible for event infrastructure)
+    internal::helper::FileDescriptor epollInstance;
+    // Exit event descriptor - eventfd (used to exit the event loop)
+    internal::helper::FileDescriptor exitEvent;
+    
     // Socket addr
     struct sockaddr coreSockAddr;
     // Socket flags
@@ -2230,7 +2265,7 @@ namespace SimpleHTTP {
      * - Eventloop was shut down (core socket closed)
      * - Exception occured
      */
-    void StartEventLoop(internal::helper::FileDescriptor &epollSocket) {
+    void StartEventLoop() {
       // Buffer with list of connection events
       // This is used by the epoll instance to insert the events on every loop
       struct epoll_event conEvents[config.maxEventsPerLoop];
@@ -2243,6 +2278,7 @@ namespace SimpleHTTP {
       // If the map is destructed (e.g. error is thrown),
       // all sockets are closed automatically due to the RAII compatible FileDescriptor in the ConnectionState
       unordered_map<int, internal::ConnectionState> conStateMap;
+
       
       // Start main event loop
       while (1) {
@@ -2252,10 +2288,10 @@ namespace SimpleHTTP {
         for (auto &con : conStateMap) {
           if (con.second.expirationTime<now) conStateMap.erase(con.first);
         }
-        
+
         // Wait for any epoll event (includes core socket and connections)
         // The -1 timeout means that it waits indefinitely until a event is reported
-        int n = epoll_wait(epollSocket.getfd(), conEvents, config.maxEventsPerLoop, -1);
+        int n = epoll_wait(epollInstance.getfd(), conEvents, config.maxEventsPerLoop, -1);
         if (n < 0) {
           throw runtime_error(
             format(
@@ -2264,15 +2300,25 @@ namespace SimpleHTTP {
             )
           );
         }
+        
         // Handle events
         for (int i = 0; i < n; i++) {
-          if (conEvents[i].data.fd == coreSocket.getfd()) {
-            // If the event is from the core socket
-            
+          
+          // If the event is from the exit signal
+          if (conEvents[i].data.fd == exitEvent.getfd()) {
+            // If an exit signal is received, the eventloop is closed
+            // Sockets etc. are RAII compatible, this means just returning is fine,
+            // all filedescriptors will be closed and the kernel will handle the teardown process
+            return;
+          }
+
+          
+          // If the event is from the core socket          
+          else if (conEvents[i].data.fd == coreSocket.getfd()) {
             // Check if error occured, if yes fetch it and return
             // For simplicity reasons there is currently no http 500 response here
             // instead sockets are closed leading to hangup signal on the client
-            if (conEvents[i].events & EPOLLERR) {
+            if (conEvents[i].events & EPOLLERR || conEvents[i].events & EPOLLHUP) {
               int err = 0;
               socklen_t errlen = sizeof(err);
               // Read error from sockopt
@@ -2295,16 +2341,10 @@ namespace SimpleHTTP {
                 );
               }
             }
-            
-            // Check if socket hang up (happens if e.g. fd is closed)
-            // Socket hang up is expected and therefore the loop is closed without errors
-            if (conEvents[i].events & EPOLLHUP) {
-              return;
-            }
 
             // Initialize connection
             // If connection was not established correctly, it is skipped
-            auto conState = InitializeConnection(epollSocket, conEvents[i]);
+            auto conState = InitializeConnection(conEvents[i]);
             if (conState.has_value()) {
               // Copied because conSocket is moved before map[] overloader
               int conSockfd = conState.value().fd.getfd();
@@ -2314,15 +2354,16 @@ namespace SimpleHTTP {
               conStateMap[conSockfd] = std::move(conState.value());
             }
           }
+
+          
+          // If the event is from a connection
           else {
-            // If the event is from a connection
-            
             // Find ConnectionState object
             auto conStateIter = conStateMap.find(conEvents[i].data.fd);
             if (conStateIter == conStateMap.end()) {
               // If object is not found, try deleting it from epoll as it is
               // from simplehttp considered as "unmanaged".
-              epoll_ctl(epollSocket.getfd(), EPOLL_CTL_DEL, conEvents[i].data.fd, nullptr);
+              epoll_ctl(epollInstance.getfd(), EPOLL_CTL_DEL, conEvents[i].data.fd, nullptr);
               continue;
             }
             // Handle connection, if false is returned, connection is cleaned up
@@ -2333,7 +2374,7 @@ namespace SimpleHTTP {
             };
 
             // Update epoll interest for the connection, if false is returned, connection is cleaned up
-            if (!UpdateEventInterest(epollSocket, conEvents[i], conStateIter->second.stage)) {
+            if (!UpdateEventInterest(epollInstance, conEvents[i], conStateIter->second.stage)) {
               // Erase from map, this will destruct the FileDescriptor which cleans up the socket.
               conStateMap.erase(conStateIter);
               continue;
@@ -2351,9 +2392,7 @@ namespace SimpleHTTP {
      *
      * Returns nullopt if the connection could not be established
      */
-    optional<internal::ConnectionState> InitializeConnection(
-      internal::helper::FileDescriptor &epollSocket,
-      struct epoll_event &event) {
+    optional<internal::ConnectionState> InitializeConnection(struct epoll_event &event) {
 
       // Prepare accept() attributes
       struct sockaddr conSockAddr = coreSockAddr;
@@ -2369,7 +2408,7 @@ namespace SimpleHTTP {
         // Add custom fd to identify the connection
         conEvent.data.fd = conSocket.getfd();
         // Add connection to list of interest on epoll instance
-        int res = epoll_ctl(epollSocket.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
+        int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
         if (res == 0) {
           // Move the socket to the returned ConnectionState
           return internal::ConnectionState{

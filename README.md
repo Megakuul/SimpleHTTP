@@ -7,6 +7,21 @@
 Extremly simple and basic library to launch a http server.
  
 
+### Compatibility
+---
+
+Including the SimpleHTTP header, requires compiling with `C++20` standard or above.
+
+
+You can enable it in your Bazel build file by adding a flag to the `copts`:
+
+```
+cc_binary(
+    ...
+    copts = ["-std=c++23"],
+    ...
+)
+```
 
 
 ### Development
@@ -21,13 +36,13 @@ All library relevant code is located in the single header file `/src/simplehttp.
 
 
 #### Concept
----
+
 ![simplehttp flowchart](/flowchart.png)
 
 
 
 #### Examples
----
+
 In the `example` directory you will find some examples for the use of the library, with corresponding bazel build rules.
 
 
@@ -36,7 +51,7 @@ You can also use the examples for testing the application during development.
 
 
 #### Tests
----
+
 In the `test` directory you will find simple end-to-end tests which are used for automated testing.
 
 
@@ -49,7 +64,7 @@ Due to the simplicity of SimpleHTTP, there are no unit tests.
 
 
 #### Naming/Structural concept
----
+
 **Naming concept**
 
 
@@ -90,7 +105,7 @@ The reason for this concept/pattern is to hide the internal members of the objec
 
 
 #### Code-Completion
----
+
 For code-completion and documentation, I recommend using *clangd*.
 To generate the *compile_commands.json* file there are various options, I recommend to use this tool:
 

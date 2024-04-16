@@ -1,3 +1,4 @@
+#include <curl/curl.h>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -40,19 +41,38 @@ CURLcode tryConnect(CURL* curl, int maxRetries, int maxDelaySeconds) {
   return res;
 }
 
-// Callback function for curl fetch
+// Callback function for curl to write data to a local variable
 size_t curlWriteCallback(void *contents, size_t size, size_t nmemb, string *userp) {
   userp->append((char*)contents, size * nmemb);
   return size * nmemb;
 }
 
-// Callback function for curl fetch discarding data
+// Callback function for curl to discarding data
 size_t curlDiscardCallback(void *buffer, size_t size, size_t nmemb, void *userp) {
   return size * nmemb; // Indicate success but don't write the data
 }
 
-// Perform body test with fixed body
-bool performTestWithBody(CURL *curl, const string& url, const string& body, int bitShift, const string& expectedResponse) {
+// Callback function for curl to read data from a local variable
+// (function assumes that the stream is a stringdata, which it is in this test)
+size_t curlReadCallback(void *ptr, size_t size, size_t nmemb, void *stream) {
+  size_t bufferSize = 41; // Send in 41 byte chunks
+  char *data = (char*)stream; // Stream contains the data inserted with CURLOPT_READDATA
+    
+  size_t dataSize = strlen(data);
+
+  // Cap the buffersize to the datasize if no more data is available
+  bufferSize = bufferSize > dataSize ? dataSize : bufferSize;
+  // Copy the data to the internal curl buffer
+  memcpy(ptr, data, bufferSize);
+
+  // Move the data to the left so that the processed buffer is not there anymore (+1 for '\n')
+  memmove(data, data + bufferSize, dataSize - bufferSize + 1);
+  // Return the number of bytes we are sending in this chunk
+  return bufferSize;
+}
+
+// Perform body test with chunked Transfer-Encoding
+bool performTestWithBody(CURL *curl, const string& url, string body, int bitShift, int validContentLength, const string& expectedResponse) {
   CURLcode res; // Variable to store the result of the CURL operation.
   string readBuffer; // String to store the response data.
   long response_code; // Variable to store the HTTP response code.
@@ -60,7 +80,9 @@ bool performTestWithBody(CURL *curl, const string& url, const string& body, int 
   bool testPassed = false; // Flag to indicate if the test passed or failed.
 
   // Setup custom headers
+  headers = curl_slist_append(headers, "Transfer-Encoding: chunked");
   headers = curl_slist_append(headers, ("BitShift: " + to_string(bitShift)).c_str());
+  headers = curl_slist_append(headers, ("ValidContentLength: " + to_string(validContentLength)).c_str());
 
   // Reset the state of the curl session to its default state.
   curl_easy_reset(curl);
@@ -73,9 +95,11 @@ bool performTestWithBody(CURL *curl, const string& url, const string& body, int 
   // Enable the POST method for the request.
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
   if (!body.empty()) {
-    // Set the POST request body.
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.size());
+    // Set a custom read callback (as we read in chunks simulating a stream).
+    curl_easy_setopt(curl, CURLOPT_READFUNCTION, curlReadCallback);
+    // Add the ptr to the data "stream" which in this case is just the body string.
+    curl_easy_setopt(curl, CURLOPT_READDATA, body.c_str());
+    // For chunked transfer, the POSTFIELDSIZE is not set.
   }
   // Set the function to handle writing the data received in response.
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCallback); 
@@ -94,6 +118,7 @@ bool performTestWithBody(CURL *curl, const string& url, const string& body, int 
       cerr << "Expected response: " << expectedResponse << " but got: " << readBuffer << endl;
     }
   } else {
+    // Output the CURL error.
     cerr << "CURL error: " << curl_easy_strerror(res) << endl;
   }
 
@@ -102,7 +127,6 @@ bool performTestWithBody(CURL *curl, const string& url, const string& body, int 
   return testPassed;
 }
 
-// Apply bit shift (pseudo hash to verify that the body is fully processed)
 string applyBitShift(const string& input, int shift) {
   string result = input; // Copy the input string to result.
   for (auto &ch : result) {
@@ -130,56 +154,40 @@ int main(void) {
   string host = "127.0.0.1";
   // Base URL for the test server.
   string baseUrl = "http://"+host+":"+to_string(port);
+  // The content length read by the server
+  int validContentLength = 498;
   // The body content to send in the test request.
   string inputBody = generateStringFromPattern("SuperMegakuul!", 2500);
   // The bit shift value to be applied.
   int shift = 2;
-  // Transform the body content according to the bit shift operation.
-  string expectedTransformedBody = applyBitShift(inputBody, shift);
+  // Transform the body content according to the bit shift operation & only take the validContentLength.
+  string expectedTransformedBody = applyBitShift(inputBody, shift).substr(0, validContentLength);
   // Flag to indicate if all tests passed.
   bool allTestsPassed = true;
 
   // Create test server
   Server server(host, port, {
     // Buffer is smaller then the full data block, to have multiple event loop iterations
-    .sockBufferSize = 700
+    .sockBufferSize = 70
   });
 
   // Define routes
 
-  // This route tests the server's ability to read and process the body from a POST request.
+  // This route tests the server's ability to drain leftover data from the chunked body
+  // if the connection is running in keep-alive mode (default).
   // It applies a bitwise operation (shifting bits) to the body content based on a "bitshift" value
-  // provided in the request header. The transformed body is then returned as the response.
-  // If the transformation is successful, it returns a 200 status code with the modified body.
-  // It uses the body.readAll() function to block until all data is read.
-  server.Route("POST", "/process_body_readall", [](Request &req, Body &body, Response &res) -> Task<bool> {
+  // provided in the request header, unlike the process_body tests; however, it only reads
+  // a certain amount of data specified in the "validcontent" header. By this, there is data leftover on
+  // the body, this data must be "eaten" by the server to clean up the connection buffers
+  // (including client buffer, network stack tcp buffer, bsd socket buffer, etc.)
+  server.Route("POST", "/process_only_valid_body", [](Request &req, Body &body, Response &res) -> Task<bool> {
+    auto validContentLengthHeader = req.getHeader("validcontentlength");
     auto bitShiftHeader = req.getHeader("bitshift");
+    int validContentLength = stoi(*validContentLengthHeader);
     int bitShift = bitShiftHeader ? stoi(*bitShiftHeader) : 0; // Default to no shift if header is missing
-  
-    auto data = co_await body.readAll();
-    string dataStr(data.begin(), data.end());
-    
-    res.setStatusCode(200).setBody(
-      applyBitShift(dataStr, bitShift)
-    );
-    co_return true;
-  });
 
-  // This route tests the server's ability to incrementally read and process the body from a POST request.
-  // Similar to the readall route, it performs a bitwise operation (shifting bits) on the body based on a
-  // "bitshift" header value after combining the chunks to form the complete transformed body.
-  // The server returns this modified body with a 200 status code upon successful processing.
-  // It uses the body.read(n) function to read data from the body incrementally.
-  server.Route("POST", "/process_body_readloop", [](Request &req, Body &body, Response &res) -> Task<bool> {
-    auto bitShiftHeader = req.getHeader("bitshift");
-    int bitShift = bitShiftHeader ? stoi(*bitShiftHeader) : 0; // Default to no shift if header is missing
-  
-    string dataStr;
-    while (true) {
-      auto data = co_await body.read(512); // Read in chunks
-      if (data.empty()) break; // Exit loop if no more data
-      dataStr.append(data.begin(), data.end());
-    }
+    auto data = co_await body.read(validContentLength);
+    string dataStr(data.begin(), data.end());
 
     res.setStatusCode(200).setBody(
       applyBitShift(dataStr, bitShift)
@@ -213,32 +221,25 @@ int main(void) {
     return 1;
   }
 
-  // Test with correct body and header for fixed transfer to /process_body_readall
+  // Test with correct body for chunked transfer to /process_only_valid_body
   allTestsPassed &= performTestWithBody(
     curl,
-    baseUrl + "/process_body_readall",
-    inputBody, shift, expectedTransformedBody
+    baseUrl + "/process_only_valid_body",
+    inputBody, shift, validContentLength, expectedTransformedBody
+  );
+  
+  // Test with correct body for chunked transfer after draining to /process_only_valid_body
+  allTestsPassed &= performTestWithBody(
+    curl,
+    baseUrl + "/process_only_valid_body",
+    inputBody, shift, validContentLength, expectedTransformedBody
   );
 
-  // Test with correct body and header for fixed transfer to /process_body_readloop
+  // Test with a 0 length body for chunked transfer after draining to /process_only_valid_body
   allTestsPassed &= performTestWithBody(
     curl,
-    baseUrl + "/process_body_readloop",
-    inputBody, shift, expectedTransformedBody
-  );
-
-  // Test with a 0 length body for fixed transfer to /process_body_readall
-  allTestsPassed &= performTestWithBody(
-    curl,
-    baseUrl + "/process_body_readall",
-    "", shift, ""
-  );
-
-  // Test with a 0 length body for fixed transfer to /process_body_readloop
-  allTestsPassed &= performTestWithBody(
-    curl,
-    baseUrl + "/process_body_readloop",
-    "", shift, ""
+    baseUrl + "/process_only_valid_body",
+    "", shift, validContentLength, ""
   );
 
   // Cleanup curl session
