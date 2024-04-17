@@ -27,6 +27,7 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1287,7 +1288,6 @@ namespace SimpleHTTP::internal {
           rawReadBuffer.set(req.size-1);
           // Copy the requested data (0-requested index) to outBuffer
           *req.outBuffer = rawReadBuffer.vecBeforeCursor();
-          
           // Erase the removed data from the buffer
           rawReadBuffer.eraseBeforeCursor();
           return true;
@@ -1487,11 +1487,10 @@ namespace SimpleHTTP::internal {
      * Throws an exception if the input is invalid encoded
      */
     bool skipChunkData() {
-      // Check if the readBuffer has enough data for nextChunkSize + CRLF
-      if (nextChunkSize+2>readBuffer.sizeAfterCursor()) {
+      // Check if the readBuffer has enough data for nextChunkSize + CRLF + current buffered char
+      if (nextChunkSize+2+1>readBuffer.sizeAfterCursor()) {
         return false;
       }
-
       // Update readBuffer cursor (including current buffered char (most likely '\n'))
       readBuffer.increment(nextChunkSize);
 
@@ -1501,6 +1500,7 @@ namespace SimpleHTTP::internal {
       identifier += readBuffer.next().value();
       // Read '\n'
       identifier += readBuffer.next().value();
+
 
       // Check if CRLF is present
       if (identifier!="\r\n") {
@@ -1930,7 +1930,7 @@ namespace SimpleHTTP {
 
       // Retrieve current flags
       sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
-      if (res < 0) {
+      if (sockFlags < 0) {
         throw runtime_error(
           format(
             "Failed to initialize HTTP server ({}):\n{}",
@@ -2401,27 +2401,38 @@ namespace SimpleHTTP {
       // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
       // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
       internal::helper::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
-      if (conSocket.getfd() > 0) {
-        // Create conEvent with EPOLLIN interest
-        struct epoll_event conEvent;
-        conEvent.events = EPOLLIN;
-        // Add custom fd to identify the connection
-        conEvent.data.fd = conSocket.getfd();
-        // Add connection to list of interest on epoll instance
-        int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
-        if (res == 0) {
-          // Move the socket to the returned ConnectionState
-          return internal::ConnectionState{
-            // Move filedescriptor from conSocket
-            .fd = std::move(conSocket),
-            // Set stage to REQ
-            .stage = internal::Stage::REQ,
-            // Set expiration time
-            .expirationTime = chrono::system_clock::now() + config.connectionTimeout
-          };
-        }
-      }
-      return nullopt;
+      // On failure return nullopt
+      if (conSocket.getfd() < 1) return nullopt;
+
+      // Retrieve current socket flags
+      sockFlags = fcntl(conSocket.getfd(), F_GETFL, 0);
+      if (sockFlags < 0) return nullopt;
+
+      // Add nonblocking flag to the flags
+      sockFlags = sockFlags | O_NONBLOCK;
+
+      // Set updated flag
+      int res = fcntl(conSocket.getfd(), F_SETFL, sockFlags);
+      if (res < 0) return nullopt;
+      
+      // Create conEvent with EPOLLIN interest
+      struct epoll_event conEvent;
+      conEvent.events = EPOLLIN;
+      // Add custom fd to identify the connection
+      conEvent.data.fd = conSocket.getfd();
+      // Add connection to list of interest on epoll instance
+      res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, conSocket.getfd(), &conEvent);
+      if (res == 0) {
+        // Move the socket to the returned ConnectionState
+        return internal::ConnectionState{
+          // Move filedescriptor from conSocket
+          .fd = std::move(conSocket),
+          // Set stage to REQ
+          .stage = internal::Stage::REQ,
+          // Set expiration time
+          .expirationTime = chrono::system_clock::now() + config.connectionTimeout
+        };
+      } else return nullopt;
     }
 
 
