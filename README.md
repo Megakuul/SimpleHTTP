@@ -33,6 +33,7 @@ This library is designed for basic internal HTTP servers, such as building a Met
 - Linux kernel compatibility only
 
 
+
 ### Example
 ---
 
@@ -111,6 +112,11 @@ cc_binary(
     ...
 )
 ```
+
+Also ensure that the std lib used supports `<format>` and `<coroutine>` headers. At least those versions are required:
+
+- GCC libstdc++ 13.1
+- Clang libc++ 15.0
 
 
 
