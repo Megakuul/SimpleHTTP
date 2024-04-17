@@ -1,7 +1,7 @@
 cc_test(
     name = "verify_query_params",
     srcs = glob(["verify_query_params_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],
@@ -11,7 +11,7 @@ cc_test(
 cc_test(
     name = "verify_headers",
     srcs = glob(["verify_headers_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],
@@ -21,7 +21,7 @@ cc_test(
 cc_test(
     name = "process_fixed_body",
     srcs = glob(["process_fixed_body_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],
@@ -31,7 +31,7 @@ cc_test(
 cc_test(
     name = "drain_fixed_body",
     srcs = glob(["drain_fixed_body_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],
@@ -41,7 +41,7 @@ cc_test(
 cc_test(
     name = "process_chunked_body",
     srcs = glob(["process_chunked_body_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],
@@ -51,7 +51,7 @@ cc_test(
 cc_test(
     name = "drain_chunked_body",
     srcs = glob(["drain_chunked_body_test.cpp"]),
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     tags = ["requires-network"],
     size = "small",
     deps = ["@curl//:curl", "//src:simplehttp"],

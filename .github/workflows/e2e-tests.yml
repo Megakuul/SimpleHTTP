@@ -1,26 +1,53 @@
 name: e2e-tests
 
-on:
-  pull_request:
+on: [pull_request]
     
 jobs:
-  basic_http_tests:
+  e2e_tests:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Setup environment
-      run: |
-        apt install -y apt-transport-https curl gnupg
-        curl -fsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor >bazel-archive-keyring.gpg
-        sudo mv bazel-archive-keyring.gpg /usr/share/keyrings
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-        apt update -y
-        apt install bazel -y
-        
-    - name: Run basic test with unix socket
-      run: |
-        bazel test //test:basic_http_unix
 
-    - name: Run basic test with tcp socket
+    - name: Setup Clang (libc++15)
       run: |
-        bazel test //test:basic_http_tcp
+        sudo apt update
+        sudo apt install -y clang-15
+        
+    - uses: bazel-contrib/setup-bazel@0.8.1
+      with:
+        # Avoid downloading Bazel every time.
+        bazelisk-cache: true
+        # Store build cache per workflow.
+        disk-cache: ${{ github.workflow }}
+        # Share repository cache between workflows.
+        repository-cache: true
+        bazelrc: |
+          common --enable_bzlmod
+          build --color=yes
+          build --action_env CC=/usr/bin/clang-15
+          build --action_env CXX=/usr/bin/clang++-15
+
+        
+    - name: Verify query parameters
+      run: |
+        bazel test //test:verify_query_params --test_output=streamed
+
+    - name: Verify headers
+      run: |
+        bazel test //test:verify_headers --test_output=streamed
+
+    - name: Process fixed body
+      run: |
+        bazel test //test:process_fixed_body --test_output=streamed
+
+    - name: Drain fixed body
+      run: |
+        bazel test //test:drain_fixed_body --test_output=streamed
+        
+    - name: Process chunked body
+      run: |
+        bazel test //test:process_chunked_body --test_output=streamed
+
+    - name: Drain chunked body
+      run: |
+        bazel test //test:drain_chunked_body --test_output=streamed
