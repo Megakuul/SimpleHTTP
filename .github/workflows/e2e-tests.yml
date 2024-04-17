@@ -27,6 +27,12 @@ jobs:
         disk-cache: ${{ github.workflow }}
         # Share repository cache between workflows.
         repository-cache: true
+        bazelrc: |
+          common --enable_bzlmod
+          build --color=yes
+          build --action_env CC=/usr/bin/gcc
+          build --action_env CXX=/usr/bin/g++
+
         
     - name: Verify query parameters
       run: |
