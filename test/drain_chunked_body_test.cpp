@@ -5,7 +5,7 @@
 #include <future>
 
 #include "curl/curl.h"
-#include "src/simplehttp.hpp"
+#include "simplehttp/simplehttp.hpp"
 
 using namespace std;
 

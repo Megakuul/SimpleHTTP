@@ -1,0 +1,14 @@
+# Ignore Compile Commands
+compile_commands.json
+
+# Ignore Bazel stuff
+bazel-*
+
+
+# Ignore Emacs stuff
+*~
+\#*\#
+.\#*
+
+# Ignore VSCode stuff
+.vscode/**

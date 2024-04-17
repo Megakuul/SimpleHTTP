@@ -1,0 +1,11 @@
+module(
+    name = "simplehttp_tests"
+)
+
+bazel_dep(name = "simplehttp", version = "")
+local_path_override(
+    module_name = "simplehttp",
+    path = "..",
+)
+
+bazel_dep(name = "curl", version = "8.4.0")

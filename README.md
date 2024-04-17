@@ -108,7 +108,7 @@ You can enable it in your Bazel build file by adding a flag to the `copts`:
 ```
 cc_binary(
     ...
-    copts = ["-std=c++23"],
+    copts = ["-std=c++20"],
     ...
 )
 ```
@@ -128,7 +128,7 @@ If you work on a PR which takes more then 2 commits, create a feature branch and
 
 
 
-All library relevant code is located in the single header file `/src/simplehttp.h`.
+All library relevant code is located in the single header file `simplehttp/simplehttp.hpp`.
 
 
 #### Concept

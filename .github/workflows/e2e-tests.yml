@@ -29,25 +29,31 @@ jobs:
 
         
     - name: Verify query parameters
+      working-directory: ./test
       run: |
-        bazel test //test:verify_query_params --test_output=streamed
+        bazel test //:verify_query_params --test_output=streamed
 
     - name: Verify headers
+      working-directory: ./test
       run: |
-        bazel test //test:verify_headers --test_output=streamed
+        bazel test //:verify_headers --test_output=streamed
 
     - name: Process fixed body
+      working-directory: ./test
       run: |
-        bazel test //test:process_fixed_body --test_output=streamed
+        bazel test //:process_fixed_body --test_output=streamed
 
     - name: Drain fixed body
+      working-directory: ./test
       run: |
-        bazel test //test:drain_fixed_body --test_output=streamed
+        bazel test //:drain_fixed_body --test_output=streamed
         
     - name: Process chunked body
+      working-directory: ./test
       run: |
-        bazel test //test:process_chunked_body --test_output=streamed
+        bazel test //:process_chunked_body --test_output=streamed
 
     - name: Drain chunked body
+      working-directory: ./test
       run: |
-        bazel test //test:drain_chunked_body --test_output=streamed
+        bazel test //:drain_chunked_body --test_output=streamed

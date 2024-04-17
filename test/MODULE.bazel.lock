@@ -1,6 +1,6 @@
 {
   "lockFileVersion": 6,
-  "moduleFileHash": "d4d1d1a4cf0eb36c257c4876b493070f9ae6a8981c4849d63fff8c84283f0211",
+  "moduleFileHash": "3a386c19d66c0201a5140f4e7ab871069888f24fb896f73d8d350631a6fd6a80",
   "flags": {
     "cmdRegistries": [
       "https://bcr.bazel.build/"
@@ -13,13 +13,29 @@
     "compatibilityMode": "ERROR"
   },
   "localOverrideHashes": {
-    "bazel_tools": "1ae69322ac3823527337acf02016e8ee95813d8d356f47060255b8956fa642f0"
+    "bazel_tools": "1ae69322ac3823527337acf02016e8ee95813d8d356f47060255b8956fa642f0",
+    "simplehttp": "d4d1d1a4cf0eb36c257c4876b493070f9ae6a8981c4849d63fff8c84283f0211"
   },
   "moduleDepGraph": {
     "<root>": {
+      "name": "simplehttp_tests",
+      "version": "",
+      "key": "<root>",
+      "repoName": "simplehttp_tests",
+      "executionPlatformsToRegister": [],
+      "toolchainsToRegister": [],
+      "extensionUsages": [],
+      "deps": {
+        "simplehttp": "simplehttp@_",
+        "curl": "curl@8.4.0",
+        "bazel_tools": "bazel_tools@_",
+        "local_config_platform": "local_config_platform@_"
+      }
+    },
+    "simplehttp@_": {
       "name": "simplehttp",
       "version": "0.1.0",
-      "key": "<root>",
+      "key": "simplehttp@_",
       "repoName": "simplehttp",
       "executionPlatformsToRegister": [],
       "toolchainsToRegister": [],
@@ -30,34 +46,16 @@
         "local_config_platform": "local_config_platform@_"
       }
     },
-    "platforms@0.0.9": {
-      "name": "platforms",
-      "version": "0.0.9",
-      "key": "platforms@0.0.9",
-      "repoName": "platforms",
+    "curl@8.4.0": {
+      "name": "curl",
+      "version": "8.4.0",
+      "key": "curl@8.4.0",
+      "repoName": "curl",
       "executionPlatformsToRegister": [],
       "toolchainsToRegister": [],
-      "extensionUsages": [
-        {
-          "extensionBzlFile": "@platforms//host:extension.bzl",
-          "extensionName": "host_platform",
-          "usingModule": "platforms@0.0.9",
-          "location": {
-            "file": "https://bcr.bazel.build/modules/platforms/0.0.9/MODULE.bazel",
-            "line": 9,
-            "column": 30
-          },
-          "imports": {
-            "host_platform": "host_platform"
-          },
-          "devImports": [],
-          "tags": [],
-          "hasDevUseExtension": false,
-          "hasNonDevUseExtension": true
-        }
-      ],
+      "extensionUsages": [],
       "deps": {
-        "rules_license": "rules_license@0.0.7",
+        "platforms": "platforms@0.0.9",
         "bazel_tools": "bazel_tools@_",
         "local_config_platform": "local_config_platform@_"
       },
@@ -66,11 +64,14 @@
         "ruleClassName": "http_archive",
         "attributes": {
           "urls": [
-            "https://github.com/bazelbuild/platforms/releases/download/0.0.9/platforms-0.0.9.tar.gz"
+            "https://github.com/curl/curl/releases/download/curl-8_4_0/curl-8.4.0.tar.gz"
           ],
-          "integrity": "sha256-XtpTnIQSZQMcL4LYrno6ZJC9YhduDAOPxGnqv5H2FJs=",
-          "strip_prefix": "",
-          "remote_patches": {},
+          "integrity": "sha256-gW5BgJwEP/KF6MDwanWh+iUCEbv7LcCgN+7vOfGp5Cc=",
+          "strip_prefix": "curl-8.4.0",
+          "remote_patches": {
+            "https://bcr.bazel.build/modules/curl/8.4.0/patches/add_build_file.patch": "sha256-Vcb973u9Diuzp+nG0XzkID+LvaTdbJ6M6tZxH1Vtyo0=",
+            "https://bcr.bazel.build/modules/curl/8.4.0/patches/module_dot_bazel.patch": "sha256-EEYIkUUDdDiyntAtQHOhsgwqJgs/EvZP6pjuxPUeWIo="
+          },
           "remote_patch_strip": 0
         }
       }
@@ -240,15 +241,34 @@
         "bazel_tools": "bazel_tools@_"
       }
     },
-    "rules_license@0.0.7": {
-      "name": "rules_license",
-      "version": "0.0.7",
-      "key": "rules_license@0.0.7",
-      "repoName": "rules_license",
+    "platforms@0.0.9": {
+      "name": "platforms",
+      "version": "0.0.9",
+      "key": "platforms@0.0.9",
+      "repoName": "platforms",
       "executionPlatformsToRegister": [],
       "toolchainsToRegister": [],
-      "extensionUsages": [],
+      "extensionUsages": [
+        {
+          "extensionBzlFile": "@platforms//host:extension.bzl",
+          "extensionName": "host_platform",
+          "usingModule": "platforms@0.0.9",
+          "location": {
+            "file": "https://bcr.bazel.build/modules/platforms/0.0.9/MODULE.bazel",
+            "line": 9,
+            "column": 30
+          },
+          "imports": {
+            "host_platform": "host_platform"
+          },
+          "devImports": [],
+          "tags": [],
+          "hasDevUseExtension": false,
+          "hasNonDevUseExtension": true
+        }
+      ],
       "deps": {
+        "rules_license": "rules_license@0.0.7",
         "bazel_tools": "bazel_tools@_",
         "local_config_platform": "local_config_platform@_"
       },
@@ -257,9 +277,9 @@
         "ruleClassName": "http_archive",
         "attributes": {
           "urls": [
-            "https://github.com/bazelbuild/rules_license/releases/download/0.0.7/rules_license-0.0.7.tar.gz"
+            "https://github.com/bazelbuild/platforms/releases/download/0.0.9/platforms-0.0.9.tar.gz"
           ],
-          "integrity": "sha256-RTHezLkTY5ww5cdRKgVNXYdWmNrrddjPkPKEN1/nw2A=",
+          "integrity": "sha256-XtpTnIQSZQMcL4LYrno6ZJC9YhduDAOPxGnqv5H2FJs=",
           "strip_prefix": "",
           "remote_patches": {},
           "remote_patch_strip": 0
@@ -409,6 +429,32 @@
             "https://github.com/bazelbuild/rules_java/releases/download/7.4.0/rules_java-7.4.0.tar.gz"
           ],
           "integrity": "sha256-l27wi0nJKXQfIBeQ5Z44B8cq2B9CjIvJU82+/1/tFes=",
+          "strip_prefix": "",
+          "remote_patches": {},
+          "remote_patch_strip": 0
+        }
+      }
+    },
+    "rules_license@0.0.7": {
+      "name": "rules_license",
+      "version": "0.0.7",
+      "key": "rules_license@0.0.7",
+      "repoName": "rules_license",
+      "executionPlatformsToRegister": [],
+      "toolchainsToRegister": [],
+      "extensionUsages": [],
+      "deps": {
+        "bazel_tools": "bazel_tools@_",
+        "local_config_platform": "local_config_platform@_"
+      },
+      "repoSpec": {
+        "bzlFile": "@@bazel_tools//tools/build_defs/repo:http.bzl",
+        "ruleClassName": "http_archive",
+        "attributes": {
+          "urls": [
+            "https://github.com/bazelbuild/rules_license/releases/download/0.0.7/rules_license-0.0.7.tar.gz"
+          ],
+          "integrity": "sha256-RTHezLkTY5ww5cdRKgVNXYdWmNrrddjPkPKEN1/nw2A=",
           "strip_prefix": "",
           "remote_patches": {},
           "remote_patch_strip": 0

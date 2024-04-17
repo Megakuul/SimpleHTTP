@@ -1,6 +1,6 @@
 #include <vector>
 
-#include "src/simplehttp.hpp"
+#include "simplehttp/simplehttp.hpp"
 
 using namespace std;
 using namespace SimpleHTTP;
