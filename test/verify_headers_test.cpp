@@ -99,9 +99,13 @@ bool performTestWithHeaders(CURL *curl, const string& url, const string& header1
 }
 
 
-int main(void) {
+int main(int argc, char* argv[]) {
   // Test server port
-  int port = 8080;
+  int port = 8000; // Default 8000
+  // Check if port argument was provided
+  if (argc > 1) {
+    port = stoi(argv[1]);
+  }
   // Test server host
   string host = "127.0.0.1";
   // Base URL for the test server.

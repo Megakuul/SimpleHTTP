@@ -1,5 +1,9 @@
 {
   "integrity": "",
   "strip_prefix": "",  
-  "url": "https://github.com/{OWNER}/{REPO}/releases/download/{TAG}/{REPO}-{TAG}.tar.gz"
+  "url": "https://github.com/{OWNER}/{REPO}/releases/download/{TAG}/{REPO}-{TAG}.tar.gz",
+  "patch_strip": 0,
+  "patches": {
+      "add_workspace_file.patch": "sha256-U0RYCMnyewuOerGjGAXveHFPqVX737hnKCtRTaTinL4="
+  }
 }
