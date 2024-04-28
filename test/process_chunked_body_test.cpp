@@ -168,10 +168,13 @@ int main(int argc, char* argv[]) {
   bool allTestsPassed = true;
 
   // Create test server
-  Server server(host, port, {
+  Server server({
     // Buffer is smaller then the full data block, to have multiple event loop iterations
     .sockBufferSize = 700
   });
+
+  // Initialize test server
+  server.Init(host, port);
 
   // Define routes
 
@@ -237,7 +240,7 @@ int main(int argc, char* argv[]) {
   CURLcode res = tryConnect(curl, 5, 10);
   if (res != CURLE_OK) {
     cerr << "Failed connecting to test server: " << curl_easy_strerror(res) << endl;
-    server.Kill();
+    server.Shutdown();
     return 1;
   }
 
@@ -273,7 +276,7 @@ int main(int argc, char* argv[]) {
   curl_easy_cleanup(curl);
 
   // Kill test server
-  server.Kill();
+  server.Shutdown();
 
   // Wait for the server to exit
   serverFut.get();

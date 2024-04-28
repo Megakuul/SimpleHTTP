@@ -40,13 +40,15 @@ This library is designed for basic internal HTTP servers, such as building a Met
 Basic example of how to use the SimpleHTTP server:
 
 ```cpp
-#include "simplehttp.hpp"
+#include "simplehttp/simplehttp.hpp"
 
 using namespace SimpleHTTP;
 
 vector<string> list;
 
-Server server("0.0.0.0", 8080);
+Server server();
+
+server.Init("0.0.0.0", 8080);
 
 server.Route("POST", "/add", [&](Request &req, Body &body, Response &res) -> Task<bool> {
   auto tokenHeader = req.getHeader("authorization");

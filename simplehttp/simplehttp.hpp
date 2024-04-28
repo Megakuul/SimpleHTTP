@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -1887,204 +1888,15 @@ namespace SimpleHTTP {
    */
   class Server {    
   public:
-    Server() = delete;
+    /**
+     * Creates a HTTP server object
+     */
+    Server() {};
 
     /**
-     * Launch Server using unix socket
+     * Creates a HTTP server object
      */
-    Server(string unixSockPath, ServerConfiguration config=ServerConfiguration{}) : config(config) {
-      fs::create_directories(fs::path(unixSockPath).parent_path());
-      // Clean up socket, errors are ignored, if the socket cannot be cleaned up, it will fail at bind() which is fine
-      unlink(unixSockPath.c_str());
-
-      // Initialize core socket
-      coreSocket = internal::helper::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
-      if (coreSocket.getfd() < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "create socket", strerror(errno)
-          )
-        );
-      }
-      
-      // Create sockaddr_un for convenient option setting
-      struct sockaddr_un* unSockAddr = (struct sockaddr_un *)&coreSockAddr;
-      // Clean unSockAddr, 'cause maybe some weird libs
-      // still expect it to zero out sin_zero (which C++ does not do by def)
-      memset(unSockAddr, 0, sizeof(struct sockaddr));
-      // Set unSockAddr options
-      unSockAddr->sun_family = AF_UNIX;
-      strcpy(unSockAddr->sun_path, unixSockPath.c_str());
-
-      // Bind unix socket
-      int res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(struct sockaddr_un));
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "bind socket", strerror(errno)
-          )
-        );
-      }
-
-      // Retrieve current flags
-      sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
-      if (sockFlags < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "read socket flags", strerror(errno)
-          )
-        );
-      }
-
-      // Add nonblocking flag
-      sockFlags = sockFlags | O_NONBLOCK;
-
-      // Set flags for core socket
-      res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "update socket flags", strerror(errno)
-          )
-        );
-      }
-
-      // Socket is closed automatically in destructor, because Socket is RAII compatible.
-    };
-
-    /**
-     * Launch Server using kernel network stack
-     *
-     * Multiple instances of this server can be launched in parallel to increase performance.
-     * BSD sockets with same *ip* and *port* combination, will automatically loadbalance *tcp* sessions.
-     */
-    Server(string ipAddr, u_int16_t port, ServerConfiguration config=ServerConfiguration{}) : config(config) {
-      // Create sockaddr_in for convenient option setting
-      struct sockaddr_in *inSockAddr = (struct sockaddr_in *)&coreSockAddr;
-      // Clean inSockAddr, 'cause maybe some weird libs
-      // still expect it to zero out sin_zero (which C++ does not do by def)
-      memset(inSockAddr, 0, sizeof(struct sockaddr));
-      // Set inSockAddr options
-      inSockAddr->sin_family = AF_INET;
-      inSockAddr->sin_port = htons(port);
-      
-      // Parse IPv4 addr and insert it to inSockAddr
-      int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr->sin_addr);
-      if (res==0) {
-        throw logic_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "addr parsing", "Invalid IP-Address format"
-          )
-        );
-      } else if (res==-1) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "addr parsing", strerror(errno)
-          )
-        );
-      }
-
-      // Initialize core socket
-      coreSocket = internal::helper::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
-      if (coreSocket.getfd() < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "create socket", strerror(errno)
-          )
-        );
-      }
-
-      // SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
-      // SO_REUSEPORT = Enable to cluster (lb) multiple bsd sockets with same ip + port combination
-      int opt = 1; // opt 1 indicates that the options should be enabled
-      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "set socket options", strerror(errno)
-          )
-        );
-      }
-      
-      // Set socket recv buffer (should match a regular HTTP package for optimal performance)
-      res = setsockopt(
-        coreSocket.getfd(),
-        SOL_SOCKET,
-        SO_RCVBUF,
-        &config.sockBufferSize,
-        sizeof(config.sockBufferSize)
-      );
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "set socket options", strerror(errno)
-          )
-        );
-      }
-      // Set socket send buffer (should match a regular HTTP package for optimal performance)
-      res = setsockopt(
-        coreSocket.getfd(),
-        SOL_SOCKET,
-        SO_SNDBUF,
-        &config.sockBufferSize,
-        sizeof(config.sockBufferSize)
-      );
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "set socket options", strerror(errno)
-          )
-        );
-      }
-
-      // Bind socket to specified addr
-      res = bind(coreSocket.getfd(), &coreSockAddr, sizeof(struct sockaddr_in));
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "bind socket", strerror(errno)
-          )
-        );
-      }
-
-      // Retrieve current flags
-      sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "read socket flags", strerror(errno)
-          )
-        );
-      }
-
-      // Add nonblocking flag
-      sockFlags = sockFlags | O_NONBLOCK;
-
-      // Set flags for core socket
-      res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
-      if (res < 0) {
-        throw runtime_error(
-          format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "update socket flags", strerror(errno)
-          )
-        );
-      }
-
-      // Socket is closed automatically in destructor, because Socket is RAII compatible.
-    };
+    Server(ServerConfiguration config) : config(config) {};
 
     /**
      * Adds a route to the server
@@ -2128,21 +1940,61 @@ namespace SimpleHTTP {
         [](unsigned char c){ return toupper(c); }
       );
 
+      // Write lock the routeMap
+      unique_lock<shared_mutex> lock(routeMapLock);
+      // Insert coroutine
       routeMap[route][method] = func;
     }
 
+
     /**
-     * Serve launches the HTTP server
+     * Init initializes the HTTP server on a unix Socket
      *
-     * tcp listener is initialized and the main event loop is started
-     *
-     * This function will run forever and block the thread, unless:
-     * - the server encounters a critical error, it will then throw a runtime_error
-     * - the socket is closed (e.g. with Kill()), it will then exit without error
+     * This function will bind the socket and start the listener
+     * if an error occurs an exception is thrown
      */
-    void Serve() {
+    void Init(string unixSockPath) {
+      fs::create_directories(fs::path(unixSockPath).parent_path());
+      // Clean up socket, errors are ignored, if the socket cannot be cleaned up,
+      // it will fail at bind() which is fine
+      unlink(unixSockPath.c_str());
+
+      // Initialize core socket
+      coreSocket = internal::helper::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
+      if (coreSocket.getfd() < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create socket", strerror(errno)
+          )
+        );
+      }
+
+      // Create sockaddr_un for convenient option setting
+      struct sockaddr_un unSockAddr;
+      // Clean unSockAddr, 'cause maybe some weird libs
+      // still expect it to zero out sin_zero (which C++ does not do by def)
+      memset(&unSockAddr, 0, sizeof(struct sockaddr));
+      // Set unSockAddr options
+      unSockAddr.sun_family = AF_UNIX;
+      strcpy(unSockAddr.sun_path, unixSockPath.c_str());
+
+      // Bind unix socket
+      int res = bind(coreSocket.getfd(), (struct sockaddr *)&unSockAddr, sizeof(struct sockaddr_un));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "bind socket", strerror(errno)
+          )
+        );
+      }
+
+      // Apply options and flags to the socket
+      ApplyCoreSocketOptions();
+
       // Start listener on core socket
-      int res = listen(coreSocket.getfd(), config.sockQueueSize);
+      res = listen(coreSocket.getfd(), config.sockQueueSize);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -2151,6 +2003,112 @@ namespace SimpleHTTP {
           )
         );
       }
+
+      // Socket is closed automatically in destructor, because Socket is RAII compatible.      
+    }
+
+
+    /**
+     * Init initializes the HTTP server on a tcp socket
+     *
+     * This function will bind the socket and start the listener
+     * if an error occurs an exception is thrown
+     */
+    void Init(string ipAddr, u_int16_t port) {
+      // Create sockaddr_in for convenient option setting
+      struct sockaddr_in inSockAddr;
+      // Clean inSockAddr, 'cause maybe some weird libs
+      // still expect it to zero out sin_zero (which C++ does not do by def)
+      memset(&inSockAddr, 0, sizeof(struct sockaddr_in));
+      // Set inSockAddr options
+      inSockAddr.sin_family = AF_INET;
+      inSockAddr.sin_port = htons(port);
+      
+      // Parse IPv4 addr and insert it to inSockAddr
+      int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr.sin_addr);
+      if (res==0) {
+        throw logic_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "addr parsing", "Invalid IP-Address format"
+          )
+        );
+      } else if (res==-1) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "addr parsing", strerror(errno)
+          )
+        );
+      }
+
+      // Initialize core socket
+      coreSocket = internal::helper::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
+      if (coreSocket.getfd() < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create socket", strerror(errno)
+          )
+        );
+      }
+
+      // SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
+      int opt = 1; // opt 1 indicates that the options should be enabled
+      res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
+          )
+        );
+      }
+
+      // Bind socket to specified addr
+      res = bind(coreSocket.getfd(), (struct sockaddr *)&inSockAddr, sizeof(struct sockaddr_in));
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "bind socket", strerror(errno)
+          )
+        );
+      }
+
+      // Apply options and flags to the socket
+      ApplyCoreSocketOptions();
+
+      // Start listener on core socket
+      res = listen(coreSocket.getfd(), config.sockQueueSize);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "start listener", strerror(errno)
+          )
+        );
+      }
+
+      // Socket is closed automatically in destructor, because Socket is RAII compatible.
+    }
+    
+
+    /**
+     * Serve launches the HTTP server handling
+     *
+     * It will handle requests from the core listener socket
+     *
+     * The function can be called from multiple threads without additional synchronisation
+     *
+     * This function will run forever and block the thread, unless:
+     * - the server encounters a critical error, it will then throw a runtime_error
+     * - the socket is closed (e.g. with Shutdown()), it will then exit without error
+     */
+    void Serve() {
+
+      // Epoll event instance (responsible for event infrastructure)
+      internal::helper::FileDescriptor epollInstance;
 
       // Create epoll instance
       epollInstance = internal::helper::FileDescriptor(epoll_create1(0));
@@ -2169,7 +2127,7 @@ namespace SimpleHTTP {
       coreSockEvent.events = EPOLLIN;
       coreSockEvent.data.fd = coreSocket.getfd();
       
-      res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
+      int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
       if (res < 0) {
         throw runtime_error(
           format(
@@ -2207,27 +2165,26 @@ namespace SimpleHTTP {
         );
       }
 
-
       // Run event loop
-      StartEventLoop();
+      StartEventLoop(epollInstance);
     }
 
 
 
     /**
-     * Kill shuts down the server
+     * Shutdown shuts down the server
      *
      * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
      *
-     * Kill() will essentially close the core socket of the server
+     * Shutdown() will essentially close the core socket of the server
      * This leads to the following events:
      * - Immediately, new tcp connections to the server are rejected
      * - Running sessions are closed on tcp level in the next event loop
-     * - The blocking Serve() will exit after next event loop
+     * - The blocking Serve() calls (in all threads) will exit after next event loop
      *
-     * Kill is thread-safe.
+     * Shutdown is thread-safe.
      */
-    void Kill() {
+    void Shutdown() {
       uint64_t increment = 1;
       write(exitEvent.getfd(), &increment, sizeof(uint64_t));
     }
@@ -2235,28 +2192,95 @@ namespace SimpleHTTP {
     
   private:
     // Core bsd socket (responsible for establishing connections)
+    // The coreSocket is threadsafe due to the underlying FileDescriptor class
     internal::helper::FileDescriptor coreSocket;
-    // Epoll event instance (responsible for event infrastructure)
-    internal::helper::FileDescriptor epollInstance;
-    // Exit event descriptor - eventfd (used to exit the event loop)
+    // Exit event descriptor - eventfd (used to exit the runnning event loops)
+    // The exitEvent is threadsafe due to the underlying FileDescriptor class
     internal::helper::FileDescriptor exitEvent;
     
-    // Socket addr
-    struct sockaddr coreSockAddr;
-    // Socket flags
-    int sockFlags;
     // Server configuration
-    ServerConfiguration config;
+    // The configuration is threadsafe because it is constant and only mutated on initialization
+    const ServerConfiguration config;
     
     // Defines a map in which each key, corresponding to an HTTP path (e.g. "/api/some", 
     // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
     // with their respective handler functions.
+    // RouteMap is threadsafe because it is synchronized with the routeMapLock
     unordered_map<string, unordered_map<string, function<Task<bool>(
       Request&,
       Body&,
       Response&
     )>>> routeMap;
+    // Synchronizes the access to the routeMap    
+    shared_mutex routeMapLock;
 
+    /**
+     * Applies flags and options to the core socket
+     * based on the current server and socket state.
+     *
+     * If an operation fails, it will throw a runtime_error
+     */
+    void ApplyCoreSocketOptions() {            
+      // Set socket recv buffer (should match a regular HTTP package for optimal performance)
+      int res = setsockopt(
+        coreSocket.getfd(),
+        SOL_SOCKET,
+        SO_RCVBUF,
+        &config.sockBufferSize,
+        sizeof(config.sockBufferSize)
+      );
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
+          )
+        );
+      }
+      // Set socket send buffer (should match a regular HTTP package for optimal performance)
+      res = setsockopt(
+        coreSocket.getfd(),
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &config.sockBufferSize,
+        sizeof(config.sockBufferSize)
+      );
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "set socket options", strerror(errno)
+          )
+        );
+      }
+
+      // Retrieve current flags
+      int sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "read socket flags", strerror(errno)
+          )
+        );
+      }
+
+      // Add nonblocking flag
+      sockFlags = sockFlags | O_NONBLOCK;
+
+      // Set flags for core socket
+      res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
+      if (res < 0) {
+        throw runtime_error(
+          format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "update socket flags", strerror(errno)
+          )
+        );
+      }
+    }
+
+    
     /**
      * Initialize and start simplehttp event loop
      *
@@ -2265,7 +2289,7 @@ namespace SimpleHTTP {
      * - Eventloop was shut down (core socket closed)
      * - Exception occured
      */
-    void StartEventLoop() {
+    void StartEventLoop(internal::helper::FileDescriptor &epollInstance) {
       // Buffer with list of connection events
       // This is used by the epoll instance to insert the events on every loop
       struct epoll_event conEvents[config.maxEventsPerLoop];
@@ -2344,7 +2368,7 @@ namespace SimpleHTTP {
 
             // Initialize connection
             // If connection was not established correctly, it is skipped
-            auto conState = InitializeConnection(conEvents[i]);
+            auto conState = InitializeConnection(epollInstance, conEvents[i]);
             if (conState.has_value()) {
               // Copied because conSocket is moved before map[] overloader
               int conSockfd = conState.value().fd.getfd();
@@ -2392,10 +2416,11 @@ namespace SimpleHTTP {
      *
      * Returns nullopt if the connection could not be established
      */
-    optional<internal::ConnectionState> InitializeConnection(struct epoll_event &event) {
+    optional<internal::ConnectionState> InitializeConnection(
+      internal::helper::FileDescriptor &epollInstance, struct epoll_event &event) {
 
       // Prepare accept() attributes
-      struct sockaddr conSockAddr = coreSockAddr;
+      struct sockaddr conSockAddr;
       socklen_t conSockLen = sizeof(conSockAddr);
       // Accept connections if any (if no waiting connection, it will result will be -1 and is skipped)
       // Socket is immediately wrapped with a FileDescriptor, by this if any further action fails
@@ -2405,7 +2430,7 @@ namespace SimpleHTTP {
       if (conSocket.getfd() < 1) return nullopt;
 
       // Retrieve current socket flags
-      sockFlags = fcntl(conSocket.getfd(), F_GETFL, 0);
+      int sockFlags = fcntl(conSocket.getfd(), F_GETFL, 0);
       if (sockFlags < 0) return nullopt;
 
       // Add nonblocking flag to the flags
@@ -2787,33 +2812,37 @@ namespace SimpleHTTP {
      * Returns false if the connection should be closed
      */
     bool InitializeFunction(internal::ConnectionState &state) {
-      // Find route
-      auto routeIter = routeMap.find(state.request->getPath());
-      if (routeIter == routeMap.end()) {
-        (*state.response)
-          .setStatusCode(404)
-          .setStatusReason("Not Found")
-          .setContentType("text/plain")
-          .setBody("The requested resource "+state.request->getPath()+" was not found on this server\n");
-        state.stage = internal::RES;
-        return true;
-      }
-      // Find type / method on the route
-      auto handlerIter = routeIter->second.find(state.request->getMethod());
-      if (handlerIter == routeIter->second.end()) {
-        (*state.response)
-          .setStatusCode(405)
-          .setStatusReason("Method Not Allowed")
-          .setContentType("text/plain")
-          .setBody("The method '"+state.request->getMethod()+"' is not allowed for the requested resource\n");
-        state.stage = internal::RES;
-        return true;
-      }
+      {
+        // Read lock the routeMap
+        shared_lock<shared_mutex> lock(routeMapLock);
+        // Find route
+        auto routeIter = routeMap.find(state.request->getPath());
+        if (routeIter == routeMap.end()) {
+          (*state.response)
+            .setStatusCode(404)
+            .setStatusReason("Not Found")
+            .setContentType("text/plain")
+            .setBody("The requested resource "+state.request->getPath()+" was not found on this server\n");
+          state.stage = internal::RES;
+          return true;
+        }
+        // Find type / method on the route
+        auto handlerIter = routeIter->second.find(state.request->getMethod());
+        if (handlerIter == routeIter->second.end()) {
+          (*state.response)
+            .setStatusCode(405)
+            .setStatusReason("Method Not Allowed")
+            .setContentType("text/plain")
+            .setBody("The method '"+state.request->getMethod()+"' is not allowed for the requested resource\n");
+          state.stage = internal::RES;
+          return true;
+        }
 
-      // Create function handle
-      // Coroutine is immediately suspended due to the promise which uses suspend_always as initial_suspend
-      state.funcHandle = handlerIter->second(*state.request, *state.body, *state.response);
-
+        // Create function handle
+        // Coroutine is immediately suspended due to the promise which uses suspend_always as initial_suspend
+        state.funcHandle = handlerIter->second(*state.request, *state.body, *state.response);
+      }
+      
       // Directly start processing coroutine
       return ProcessFunction(state);
     }
