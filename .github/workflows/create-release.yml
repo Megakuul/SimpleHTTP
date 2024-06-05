@@ -1,0 +1,48 @@
+name: Build and upload
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: define tag name
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: define asset paths
+        if: ${{ env.RELEASE_VERSION != '' }}
+        run: |
+          echo "SIMPLEHTTP_OUTPUT=simplehttp-{{ env.RELEASE_VERSION }}.tar.gz" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_SRC=simplehttp/" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_TEST=test/" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_MODULE=MODULE.bazel" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_MODULE_LOCK=MODULE.bazel.lock" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_BUILD=BUILD.bazel" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_LICENSE=LICENSE" >> $GITHUB_ENV
+
+      - name: construct archive
+        if: ${{ env.RELEASE_VERSION != '' }}
+        run: |
+          tar -czvf ${{ env.SIMPLEHTTP_OUTPUT }} \ 
+            ${{ env.SIMPLEHTTP_SRC }} \
+            ${{ env.SIMPLEHTTP_TEST }} \
+            ${{ env.SIMPLEHTTP_MODULE }} \
+            ${{ env.SIMPLEHTTP_MODULE_LOCK }} \
+            ${{ env.SIMPLEHTTP_BUILD }} \
+            ${{ env.SIMPLEHTTP_LICENSE }}
+    
+      - name: create release
+        if: ${{ env.RELEASE_VERSION != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.SIMPLEHTTP_OUTPUT }}

@@ -60,9 +60,6 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 
-using namespace std;
-
-namespace fs = filesystem;
 
 /**
  * Namespace declared for internal helper / supporter functions & classes
@@ -84,7 +81,7 @@ namespace SimpleHTTP::internal::helper {
     // Move constructor sets descriptor to -1 so that close() will not lead to undefined behavior
     FileDescriptor(FileDescriptor&& other) {
       // Lock other descriptor lock
-      lock_guard<mutex> otherLock(other.fd_mut);
+      std::lock_guard<std::mutex> otherLock(other.fd_mut);
       fd = other.fd.exchange(-1);
     };
     // Copy constructor is deleted, socket cannot be copied
@@ -94,8 +91,8 @@ namespace SimpleHTTP::internal::helper {
     FileDescriptor& operator=(FileDescriptor&& other) {
       if (this != &other) {
         // Lock both descriptor locks
-        lock_guard<mutex> localLock(fd_mut);
-        lock_guard<mutex> otherLock(other.fd_mut);
+        std::lock_guard<std::mutex> localLock(fd_mut);
+        std::lock_guard<std::mutex> otherLock(other.fd_mut);
         // Atomically set local fd to other fd and set other fd to -1
         int newfd = other.fd.exchange(-1);
         int oldfd = fd.exchange(newfd);
@@ -111,7 +108,7 @@ namespace SimpleHTTP::internal::helper {
     
     ~FileDescriptor() {
       // Lock to prevent race condition on writes
-      lock_guard<mutex> lock(fd_mut);
+      std::lock_guard<std::mutex> lock(fd_mut);
       // Close socket
       close(fd);
     };
@@ -132,7 +129,7 @@ namespace SimpleHTTP::internal::helper {
      */
     void closefd() {
       // Lock to prevent race condition on writes
-      lock_guard<mutex> lock(fd_mut);
+      std::lock_guard<std::mutex> lock(fd_mut);
       // Close socket
       close(fd);
       // Invalidate descriptor
@@ -141,12 +138,12 @@ namespace SimpleHTTP::internal::helper {
   private:
     // Filedescriptor number
     // Atomic value is used in order to omit a full mutex lock on every read operation
-    atomic<int> fd;
+    std::atomic<int> fd;
     // Mutex lock
     // Lock is used for write operations at the filedescriptor number
     // The implementation of this lock may seem a bit overcomplex for the current use case
     // but if more writer functions are implemented in the future, it will be crucial.
-    mutex fd_mut;
+    std::mutex fd_mut;
   };
 
 
@@ -197,7 +194,7 @@ namespace SimpleHTTP::internal::helper {
     /**
      * Assignes new string to buffer and resets cursors
      */
-    Buffer& operator=(const string& other) {
+    Buffer& operator=(const std::string& other) {
       buffer = other;
       headCursor = -1;
       rollbackCursor = -1;
@@ -219,7 +216,7 @@ namespace SimpleHTTP::internal::helper {
      *
      * This will not modify the cursors
      */
-    Buffer& operator+=(const string& other) {
+    Buffer& operator+=(const std::string& other) {
       buffer += other;
       return *this;
     }
@@ -240,11 +237,11 @@ namespace SimpleHTTP::internal::helper {
      *
      * If cursor is -1 nullopt is returned
      */
-    optional<char> current() {
+    std::optional<char> current() {
       if (headCursor>-1)
         return buffer[headCursor];
       else
-        return nullopt;
+        return std::nullopt;
     }
       
     /**
@@ -253,12 +250,12 @@ namespace SimpleHTTP::internal::helper {
      * If cursor is out of bound (no more data is on the buffer) nullopt is returned
      * Cursor is not incremented if the next cursor would be out of bound
      */
-    optional<char> next() {
+    std::optional<char> next() {
       int nextCursor = headCursor+1;
       if (nextCursor<int(buffer.size()))
         return buffer[headCursor=nextCursor];
       else
-        return nullopt;
+        return std::nullopt;
     }
 
     /**
@@ -348,15 +345,15 @@ namespace SimpleHTTP::internal::helper {
     /**
      * Get copy of the underlying string from index 0
      */
-    string str() {
+    std::string str() {
       return buffer;
     }
 
     /**
      * Get copy of the underlying data from index 0
      */
-    vector<unsigned char> vec() {
-      return vector<unsigned char>(buffer.begin(), buffer.end());
+    std::vector<unsigned char> vec() {
+      return std::vector<unsigned char>(buffer.begin(), buffer.end());
     }
 
     /**
@@ -386,11 +383,11 @@ namespace SimpleHTTP::internal::helper {
      *
      * If cursor is on -1 the string from 0 to end is returned
      */
-    string strAfterCursor() {
+    std::string strAfterCursor() {
       if (headCursor>-1)
-        return string(buffer.begin()+headCursor, buffer.end());
+        return std::string(buffer.begin()+headCursor, buffer.end());
       else
-        return string(buffer.begin(), buffer.end());
+        return std::string(buffer.begin(), buffer.end());
     }
 
     /**
@@ -398,9 +395,9 @@ namespace SimpleHTTP::internal::helper {
      *
      * If cursor is on -1 an empty string is returned
      */
-    string strBeforeCursor() {
+    std::string strBeforeCursor() {
       if (headCursor>-1)
-        return string(buffer.begin(), buffer.begin()+headCursor+1);
+        return std::string(buffer.begin(), buffer.begin()+headCursor+1);
       else
         return "";
     }
@@ -410,11 +407,11 @@ namespace SimpleHTTP::internal::helper {
      *
      * If cursor is on -1 the data from 0 to end is returned
      */
-    vector<unsigned char> vecAfterCursor() {
+    std::vector<unsigned char> vecAfterCursor() {
       if (headCursor>-1)
-        return vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
+        return std::vector<unsigned char>(buffer.begin()+headCursor, buffer.end());
       else
-        return vector<unsigned char>(buffer.begin(), buffer.end());
+        return std::vector<unsigned char>(buffer.begin(), buffer.end());
     }
 
     /**
@@ -422,9 +419,9 @@ namespace SimpleHTTP::internal::helper {
      *
      * If cursor is on -1 an empty array is returned
      */
-    vector<unsigned char> vecBeforeCursor() {
+    std::vector<unsigned char> vecBeforeCursor() {
       if (headCursor>-1)
-        return vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor+1);
+        return std::vector<unsigned char>(buffer.begin(), buffer.begin()+headCursor+1);
       else
         return {};
     }
@@ -500,7 +497,7 @@ namespace SimpleHTTP::internal::helper {
     }
 
   private:
-    string buffer;
+    std::string buffer;
     int headCursor = -1;
     int rollbackCursor = -1;
   };
@@ -524,28 +521,28 @@ namespace SimpleHTTP {
       // Generic return value
       T value;
       // Exception ptr
-      exception_ptr exception = nullptr;
+      std::exception_ptr exception = nullptr;
       // Predefined coroutine function called when creating the coroutine
       Task get_return_object() {
-        return Task{coroutine_handle<promise_type>::from_promise(*this)};
+        return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
       }
       // Predefined function called when coroutine is initialized
       // Coroutine is immediately suspended when created
-      suspend_always initial_suspend() { return {}; }
+      std::suspend_always initial_suspend() { return {}; }
       // Predefined function called before coroutine is destroyed (value is returned)
       // Suspend finished coroutine, to obtain things like return value / exception from the frame
       // Without suspending the operation after completion, the resources may be cleaned up before reading
-      suspend_always final_suspend() noexcept { return {}; } 
+      std::suspend_always final_suspend() noexcept { return {}; } 
       // Predefined function called when returning the value (co_return)
       void return_value(T v) { value = v; } // Store return value in promise frame before handle is destroyed
       // Predefined function called when exception is thrown
-      void unhandled_exception() { exception = current_exception(); } // Store exception to handle it later
+      void unhandled_exception() { exception = std::current_exception(); } // Store exception to handle it later
     };
 
     // Default constructor sets coroutine to nullptr
     Task() : coro(nullptr) {}
     // Constructor to initialize handle
-    Task(coroutine_handle<promise_type> h) : coro(h) {}
+    Task(std::coroutine_handle<promise_type> h) : coro(h) {}
     // Destructor to cleanup handle
     ~Task() { if (coro) coro.destroy(); }
 
@@ -588,10 +585,10 @@ namespace SimpleHTTP {
      * Throws a logic_error if coroutine is accessed after its completed
      * Rethrows exception if the coroutine completed with an uncaught exception
      */
-    optional<T> resume() {
+    std::optional<T> resume() {
       if (!coro || coro.done()) {
         // Resuming coroutine which is done() is undefined
-        throw logic_error("Attempt to resume a completed coroutine");
+        throw std::logic_error("Attempt to resume a completed coroutine");
       }
       // Resume coroutine
       coro.resume();
@@ -606,12 +603,12 @@ namespace SimpleHTTP {
         return coro.promise().value;
       } else {
         // Else return nullopt
-        return nullopt;
+        return std::nullopt;
       }
     }
   private:
     // Main coroutine handle
-    coroutine_handle<promise_type> coro;
+    std::coroutine_handle<promise_type> coro;
   };
 } // namespace SimpleHTTP
   
@@ -633,39 +630,39 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP method (e.g. GET, POST)
      */
-    virtual string getMethod() const noexcept = 0;
+    virtual std::string getMethod() const noexcept = 0;
 
     /**
      * Get HTTP path/route (e.g. /api/some)
      */
-    virtual string getPath() const noexcept = 0;
+    virtual std::string getPath() const noexcept = 0;
 
     /**
      * Get HTTP version (e.g. HTTP/1.1)
      */
-    virtual string getVersion() const noexcept = 0;
+    virtual std::string getVersion() const noexcept = 0;
     
     /**
      * Set HTTP method (e.g. GET, POST) to the request
      */
-    virtual RequestInternal& setMethod(string newmethod) = 0;
+    virtual RequestInternal& setMethod(std::string newmethod) = 0;
 
     /**
      * Set HTTP path to the request
      */
-    virtual RequestInternal& setPath(string newpath) = 0;
+    virtual RequestInternal& setPath(std::string newpath) = 0;
 
     /**
      * Set HTTP version to the request
      */
-    virtual RequestInternal& setVersion(string newversion) = 0;
+    virtual RequestInternal& setVersion(std::string newversion) = 0;
 
     /**
      * Set a header to the request
      *
      * Key is converted to lowercase
      */
-    virtual RequestInternal& setHeader(string key, string value) = 0;
+    virtual RequestInternal& setHeader(std::string key, std::string value) = 0;
   };
 } // namespace SimpleHTTP::internal
 
@@ -681,43 +678,43 @@ namespace SimpleHTTP {
     /**
      * Get HTTP method (e.g. GET, POST)
      */
-    virtual string getMethod() const noexcept = 0;
+    virtual std::string getMethod() const noexcept = 0;
 
     /**
      * Get HTTP path/route (e.g. /api/some)
      */
-    virtual string getPath() const noexcept = 0;
+    virtual std::string getPath() const noexcept = 0;
 
     /**
      * Get HTTP version (e.g. HTTP/1.1)
      */
-    virtual string getVersion() const noexcept = 0;
+    virtual std::string getVersion() const noexcept = 0;
 
     /**
      * Get Content-Length header as integer
      *
      * If no valid content-length is set, nullopt is returned
      */
-    virtual optional<int> getContentLength() = 0;
+    virtual std::optional<int> getContentLength() = 0;
 
     /**
      * Get Transfer-Encoding header as list of encodings (e.g. [ gzip, chunked ])
      *
      * If no valid transfer-encoding header is set, nullopt is returned
      */
-    virtual optional<unordered_set<string>> getTransferEncoding() = 0;
+    virtual std::optional<std::unordered_set<std::string>> getTransferEncoding() = 0;
 
     /**
      * Get a query parameter from the request
      */
-    virtual optional<string> getQueryParam(string key) = 0;
+    virtual std::optional<std::string> getQueryParam(std::string key) = 0;
 
     /**
      * Get a header from the request
      *
      * Key is strictly lowercase
      */
-    virtual optional<string> getHeader(string key) = 0;
+    virtual std::optional<std::string> getHeader(std::string key) = 0;
   };
 } // namespace SimpleHTTP
 
@@ -734,21 +731,21 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP method (e.g. GET, POST)
      */
-    string getMethod() const noexcept override {
+    std::string getMethod() const noexcept override {
       return method;
     }
 
     /**
      * Get HTTP path/route (e.g. /api/some)
      */
-    string getPath() const noexcept override {
+    std::string getPath() const noexcept override {
       return path;
     }
 
     /**
      * Get HTTP version (e.g. HTTP/1.1)
      */
-    string getVersion() const noexcept override {
+    std::string getVersion() const noexcept override {
       return version;
     }
 
@@ -757,16 +754,16 @@ namespace SimpleHTTP::internal {
      *
      * If no valid content-length is set, nullopt is returned
      */
-    optional<int> getContentLength() override {
+    std::optional<int> getContentLength() override {
       auto it = headers.find("content-length");
-      if (it == headers.end()) return nullopt;
+      if (it == headers.end()) return std::nullopt;
 
       // Convert value to integer with istringstream
-      istringstream iss(it->second);
+      std::istringstream iss(it->second);
       int length;
       if (iss >> length)
         return length;
-      else return nullopt;
+      else return std::nullopt;
     }
 
     /**
@@ -774,26 +771,26 @@ namespace SimpleHTTP::internal {
      *
      * If no valid transfer-encoding header is set, nullopt is returned
      */
-    optional<unordered_set<string>> getTransferEncoding() override {
+    std::optional<std::unordered_set<std::string>> getTransferEncoding() override {
       auto it = headers.find("transfer-encoding");
-      if (it == headers.end()) return nullopt;
+      if (it == headers.end()) return std::nullopt;
 
       // Convert transfer-encoding to a string set
       auto tokens = parseTransferEncoding(it->second);
       // If no tokens are found return nullopt
-      if (tokens.empty()) return nullopt;
+      if (tokens.empty()) return std::nullopt;
       return tokens;
     }
 
     /**
      * Get a query parameter from the request
      */
-    optional<string> getQueryParam(string key) override {
+    std::optional<std::string> getQueryParam(std::string key) override {
       auto it = queries.find(key);
       if (it != queries.end()) {
         return it->second;
       } else
-        return nullopt;
+        return std::nullopt;
     }
 
     /**
@@ -801,18 +798,18 @@ namespace SimpleHTTP::internal {
      *
      * Key is strictly lowercase
      */
-    optional<string> getHeader(string key) override {
+    std::optional<std::string> getHeader(std::string key) override {
       auto it = headers.find(key);
       if (it != headers.end()) {
         return it->second;
       } else
-        return nullopt;
+        return std::nullopt;
     }
 
     /**
      * Set HTTP method (e.g. GET, POST) to the request
      */
-    RequestImpl& setMethod(string newmethod) override {
+    RequestImpl& setMethod(std::string newmethod) override {
       method = newmethod;
       return *this;
     }
@@ -820,7 +817,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP path to the request
      */
-    RequestImpl& setPath(string newpath) override {
+    RequestImpl& setPath(std::string newpath) override {
       path = parseQueryParameters(newpath);
       return *this;
     }
@@ -828,7 +825,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP version to the request
      */
-    RequestImpl& setVersion(string newversion) override {
+    RequestImpl& setVersion(std::string newversion) override {
       version = newversion;
       return *this;
     }
@@ -838,7 +835,7 @@ namespace SimpleHTTP::internal {
      *
      * Key is converted to lowercase
      */
-    RequestImpl& setHeader(string key, string value) override {
+    RequestImpl& setHeader(std::string key, std::string value) override {
       // Key & value are converted tolower
       // in order to properly handle those in the internal structure
       
@@ -853,34 +850,34 @@ namespace SimpleHTTP::internal {
 
   private:
     // HTTP Method (e.g. Get, Post, etc.)
-    string method;
+    std::string method;
     // HTTP Path (e.g. /api/some)
-    string path;
+    std::string path;
     // HTTP Version (e.g. HTTP/1.1)
-    string version;
+    std::string version;
 
     // HTTP queries
-    unordered_map<string, string> queries;
+    std::unordered_map<std::string, std::string> queries;
     // HTTP headers
-    unordered_map<string, string> headers;
+    std::unordered_map<std::string, std::string> headers;
     
     /**
      * Parse transfer encoding header into a string set
      *
      * Returns tokens parsed as string set
      */
-    unordered_set<string> parseTransferEncoding(string rawValue) {
-      unordered_set<string> tokens;
+    std::unordered_set<std::string> parseTransferEncoding(std::string rawValue) {
+      std::unordered_set<std::string> tokens;
       // Create input stream
-      istringstream iss(rawValue);
-      string currentItem;
+      std::istringstream iss(rawValue);
+      std::string currentItem;
       // Parse Transfer Encodings
       while (getline(iss, currentItem, ',')) {
         // Trim off spaces
         auto start = currentItem.find_first_not_of(" ");
         auto end = currentItem.find_last_not_of(" ");
         // Skip if no regular char was found in the item
-        if (start==string::npos || end==string::npos) continue;
+        if (start==std::string::npos || end==std::string::npos) continue;
         // Insert slice without spaces 
         tokens.insert(currentItem.substr(start, end - start + 1));
       }
@@ -895,30 +892,30 @@ namespace SimpleHTTP::internal {
      *
      * Returns path without query parameters
      */
-    string parseQueryParameters(string path) {
+    std::string parseQueryParameters(std::string path) {
       // Search query indicator
       auto queryPos = path.find('?');
       // If no query indicator is found, the path is not modified
-      if (queryPos==string::npos) return path;
+      if (queryPos==std::string::npos) return path;
       // Obtain the new path (query params removed)
-      string newPath = path.substr(0, queryPos);
+      std::string newPath = path.substr(0, queryPos);
 
       // Obtain the query param string as input stream
-      istringstream queryStream(path.substr(queryPos+1));
+      std::istringstream queryStream(path.substr(queryPos+1));
 
       // Define token buffer
-      string token;
+      std::string token;
       // Iterate over every query param (key=value) fragment
       while (getline(queryStream, token, '&')) {
         // Search split character ("=")
         auto splitPos = token.find('=');
         // If split char not found, the fragment is invalid and skipped
-        if (splitPos==string::npos) continue;
+        if (splitPos==std::string::npos) continue;
 
         // Obtain query param key (first substr)
-        string key = token.substr(0, splitPos);
+        std::string key = token.substr(0, splitPos);
         // Obtain query param value (second substr)
-        string value = token.substr(splitPos+1);
+        std::string value = token.substr(splitPos+1);
 
         // Move values to the queries map
         queries[std::move(key)] = std::move(value);
@@ -958,7 +955,7 @@ namespace SimpleHTTP::internal {
     /**
      * Function to drain the body in the event loop
      */
-    virtual optional<internal::helper::Buffer> drainBody() = 0;
+    virtual std::optional<internal::helper::Buffer> drainBody() = 0;
   };
 } // namespace SimpleHTTP::internal
 
@@ -971,18 +968,18 @@ namespace SimpleHTTP {
   struct BodyReader {
     internal::BodyInternal& body;
     int size;
-    vector<unsigned char> outBuffer;
+    std::vector<unsigned char> outBuffer;
 
     // Always suspend
     bool await_ready() const noexcept { return false; }
 
     // Before suspending a new readRequest is created
-    void await_suspend(coroutine_handle<> h) {
+    void await_suspend(std::coroutine_handle<> h) {
       body.setReadRequest(size, &outBuffer);
     }
 
     // When resuming, reset the request and return the outBuffer
-    vector<unsigned char> await_resume() const {
+    std::vector<unsigned char> await_resume() const {
       body.clearReadRequest();
       return outBuffer;
     }
@@ -993,7 +990,7 @@ namespace SimpleHTTP {
    */
   struct BodyReadRequest {
     int size;
-    vector<unsigned char>* outBuffer;
+    std::vector<unsigned char>* outBuffer;
   };
 
   
@@ -1086,7 +1083,7 @@ namespace SimpleHTTP::internal {
      * Clear read request from the body
      */
     void clearReadRequest() override {
-      request = nullopt;
+      request = std::nullopt;
     }
     
   protected:
@@ -1107,7 +1104,7 @@ namespace SimpleHTTP::internal {
     // Data which is read from the user is erased from this
     helper::Buffer readBuffer;
     // Current pending read request
-    optional<BodyReadRequest> request;
+    std::optional<BodyReadRequest> request;
   };
 
   
@@ -1179,7 +1176,7 @@ namespace SimpleHTTP::internal {
             return false;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
-            throw runtime_error(strerror(errno));
+            throw std::runtime_error(strerror(errno));
           }
         }
         // Insert received data to readBuffer
@@ -1199,7 +1196,7 @@ namespace SimpleHTTP::internal {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<helper::Buffer> drainBody() override {
+    std::optional<helper::Buffer> drainBody() override {
       while (1) {
         // If body is fully read, return true to complete cleanup
         if (bodySize<=0) {
@@ -1213,16 +1210,16 @@ namespace SimpleHTTP::internal {
         int n = recv(socket->getfd(), buffer, bodySize, 0);
         if (n == 0) {
           // If connection was closed by peer, this is unexpected. The eventloop will clean it up
-          throw runtime_error("Connection closed unexpectedly");
+          throw std::runtime_error("Connection closed unexpectedly");
         }
         if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
-            return nullopt;
+            return std::nullopt;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
-            throw runtime_error(strerror(errno));
+            throw std::runtime_error(strerror(errno));
           }
         }
         // Decrement body size by the read bytes
@@ -1300,7 +1297,7 @@ namespace SimpleHTTP::internal {
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
         if (n == 0)
           // If connection was closed by peer, this is unexpected. The eventloop will clean it up
-          throw runtime_error("Connection closed unexpectedly");
+          throw std::runtime_error("Connection closed unexpectedly");
         if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
@@ -1308,7 +1305,7 @@ namespace SimpleHTTP::internal {
             return false;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
-            throw runtime_error(strerror(errno));
+            throw std::runtime_error(strerror(errno));
           }
         }
 
@@ -1331,7 +1328,7 @@ namespace SimpleHTTP::internal {
      *
      * Throws a runtime_error if the underlying connection fails
      */
-    optional<helper::Buffer> drainBody() override {
+    std::optional<helper::Buffer> drainBody() override {
       while (1) {
         // Process data from buffer
         while(1) {
@@ -1355,15 +1352,15 @@ namespace SimpleHTTP::internal {
         int n = recv(socket->getfd(), buffer, socketBufferSize, 0);
         if (n == 0)
           // If connection was closed by peer, this is unexpected. The eventloop will clean it up
-          throw runtime_error("Connection closed unexpectedly");
+          throw std::runtime_error("Connection closed unexpectedly");
         if (n < 1) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // If the call block give the control to the event loop
             // The event loop will then continue execution if data is available
-            return nullopt;
+            return std::nullopt;
           } else {
             // Throw exception. The eventloop will close and cleanup the tcp connection
-            throw runtime_error(strerror(errno));
+            throw std::runtime_error(strerror(errno));
           }
         }
 
@@ -1376,9 +1373,9 @@ namespace SimpleHTTP::internal {
     // Buffer holding the decoded data
     helper::Buffer rawReadBuffer;
     // Identifier buffer for the parser
-    string identifier;
+    std::string identifier;
     // Character buffer for the parser
-    optional<char> c;
+    std::optional<char> c;
     // Determines if currently chunk data is read or if the size is read
     bool readChunkState = false;
     // Determines the size of the next chunk (-1 = uninitialized, 0 = full body is read, other = size to read)
@@ -1466,7 +1463,7 @@ namespace SimpleHTTP::internal {
 
       // Check if CRLF is present
       if (identifier!="\r\n") {
-        throw runtime_error("Expected CRLF after chunk");
+        throw std::runtime_error("Expected CRLF after chunk");
       }
 
       // Erase chunk + chunkSize before cursor
@@ -1505,7 +1502,7 @@ namespace SimpleHTTP::internal {
 
       // Check if CRLF is present
       if (identifier!="\r\n") {
-        throw runtime_error("Expected CRLF after chunk");
+        throw std::runtime_error("Expected CRLF after chunk");
       }
 
       // Erase chunk + chunkSize before cursor
@@ -1534,7 +1531,7 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP version (e.g. HTTP/1.1)
      */
-    virtual string getVersion() const noexcept = 0;
+    virtual std::string getVersion() const noexcept = 0;
 
     /**
      * Get HTTP status code (e.g. 200)
@@ -1544,38 +1541,38 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP status reason (e.g. OK)
      */
-    virtual string getStatusReason() const noexcept = 0;
+    virtual std::string getStatusReason() const noexcept = 0;
 
     /**
      * Get Content-Type header
      *
      * If no valid content-type is set, nullopt is returned
      */
-    virtual optional<string> getContentType() = 0;
+    virtual std::optional<std::string> getContentType() = 0;
 
     /**
      * Get Date header as time_point from response
      *
      * If no valid date is set, nullopt is returned
      */
-    virtual optional<chrono::system_clock::time_point> getDate() = 0;
+    virtual std::optional<std::chrono::system_clock::time_point> getDate() = 0;
 
     /**
      * Get header from the response
      */
-    virtual unordered_map<string, string>& getHeaders() = 0;
+    virtual std::unordered_map<std::string, std::string>& getHeaders() = 0;
 
     /**
      * Get header to the response
      *
      * If header is not present, nullopt is returned
      */
-    virtual optional<string> getHeader(string key) = 0;
+    virtual std::optional<std::string> getHeader(std::string key) = 0;
 
     /**
      * Get body from the response
      */
-    virtual string getBody() = 0;
+    virtual std::string getBody() = 0;
   };
 } // namespace SimpleHTTP::internal
 
@@ -1596,32 +1593,32 @@ namespace SimpleHTTP {
     /**
      * Set HTTP status reason (e.g. OK)
      */
-    virtual Response& setStatusReason(string newstatusreason) = 0;
+    virtual Response& setStatusReason(std::string newstatusreason) = 0;
 
     /**
      * Set Content-Type header
      */
-    virtual Response& setContentType(string newcontenttype) = 0;
+    virtual Response& setContentType(std::string newcontenttype) = 0;
 
     /**
      * Set Date header to the response
      */
-    virtual Response& setDate(chrono::system_clock::time_point newdate) = 0;
+    virtual Response& setDate(std::chrono::system_clock::time_point newdate) = 0;
 
     /**
      * Set header to the response
      */
-    virtual Response& setHeader(string key, string newvalue) = 0;
+    virtual Response& setHeader(std::string key, std::string newvalue) = 0;
 
     /**
      * Set Body to the response
      */
-    virtual Response& setBody(string newbody) = 0;
+    virtual Response& setBody(std::string newbody) = 0;
 
     /**
      * Append data to the Body of the response
      */
-    virtual Response& appendBody(string appendbody) = 0;
+    virtual Response& appendBody(std::string appendbody) = 0;
   };
 } // namespace SimpleHTTP
 
@@ -1637,7 +1634,7 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP version (e.g. HTTP/1.1)
      */
-    string getVersion() const noexcept override {
+    std::string getVersion() const noexcept override {
       return version;
     }
 
@@ -1651,7 +1648,7 @@ namespace SimpleHTTP::internal {
     /**
      * Get HTTP status reason (e.g. OK)
      */
-    string getStatusReason() const noexcept override {
+    std::string getStatusReason() const noexcept override {
       return statusReason;
     }
 
@@ -1660,12 +1657,12 @@ namespace SimpleHTTP::internal {
      *
      * If no valid content-type is set, nullopt is returned
      */
-    optional<string> getContentType() override {
+    std::optional<std::string> getContentType() override {
       auto it = headers.find("Content-Type");
       if (it != headers.end()) {
         return it->second;
       } else
-        return nullopt;
+        return std::nullopt;
     }
 
     /**
@@ -1673,31 +1670,31 @@ namespace SimpleHTTP::internal {
      *
      * If no valid date is set, nullopt is returned
      */
-    optional<chrono::system_clock::time_point> getDate() override {
+    std::optional<std::chrono::system_clock::time_point> getDate() override {
       auto it = headers.find("Date");
       if (it == headers.end()) {
-        return nullopt;
+        return std::nullopt;
       }
 
       // Create input stream to parse the time
-      istringstream iss(it->second);
+      std::istringstream iss(it->second);
       tm date_tm = {};
       // Parse from IMF_fixdate
-      iss >> get_time(&date_tm, "%a, %d %b %Y %H:%M:%S");
+      iss >> std::get_time(&date_tm, "%a, %d %b %Y %H:%M:%S");
 
       if (iss.fail()) {
         // If it fails return nullopt
-        return nullopt;
+        return std::nullopt;
       } else {
         // If succeeded, convert to time_t and the time_t to a time_point
-        return chrono::system_clock::from_time_t(mktime(&date_tm));
+        return std::chrono::system_clock::from_time_t(mktime(&date_tm));
       }
     }
 
     /**
      * Get header from the response
      */
-    unordered_map<string, string>& getHeaders() override {
+    std::unordered_map<std::string, std::string>& getHeaders() override {
       return headers;
     }
 
@@ -1706,18 +1703,18 @@ namespace SimpleHTTP::internal {
      *
      * If header is not present, nullopt is returned
      */
-    optional<string> getHeader(string key) override {
+    std::optional<std::string> getHeader(std::string key) override {
       auto it = headers.find(key);
       if (it != headers.end()) {
         return it->second;
       } else
-        return nullopt;
+        return std::nullopt;
     }
 
     /**
      * Get body from the response
      */
-    string getBody() override {
+    std::string getBody() override {
       return body;
     }
 
@@ -1732,7 +1729,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set HTTP status reason (e.g. OK)
      */
-    ResponseImpl& setStatusReason(string newstatusreason) override {
+    ResponseImpl& setStatusReason(std::string newstatusreason) override {
       statusReason = newstatusreason;
       return *this;
     }
@@ -1740,7 +1737,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set Content-Type header
      */
-    ResponseImpl& setContentType(string newcontenttype) override {
+    ResponseImpl& setContentType(std::string newcontenttype) override {
       headers["Content-Type"] = newcontenttype;
       return *this;
     }
@@ -1748,15 +1745,15 @@ namespace SimpleHTTP::internal {
     /**
      * Set Date header to the response
      */
-    ResponseImpl& setDate(chrono::system_clock::time_point newdate) override {
+    ResponseImpl& setDate(std::chrono::system_clock::time_point newdate) override {
       // Convert to time_t
-      time_t newdate_t = chrono::system_clock::to_time_t(newdate);
+      time_t newdate_t = std::chrono::system_clock::to_time_t(newdate);
       // Convert to GMT
       tm newdate_tm = *gmtime(&newdate_t);
 
-      ostringstream oss;
+      std::ostringstream oss;
       // Parse to the IMF_fixdate format
-      oss << put_time(&newdate_tm, "%a, %d %b %Y %H:%M:%S GMT");
+      oss << std::put_time(&newdate_tm, "%a, %d %b %Y %H:%M:%S GMT");
       headers["Date"] = oss.str();
       return *this;
     }
@@ -1764,7 +1761,7 @@ namespace SimpleHTTP::internal {
     /**
      * Set header to the response
      */
-    ResponseImpl& setHeader(string key, string newvalue) override {
+    ResponseImpl& setHeader(std::string key, std::string newvalue) override {
       headers[key] = newvalue;
       return *this;
     }
@@ -1772,36 +1769,36 @@ namespace SimpleHTTP::internal {
     /**
      * Set Body to the response
      */
-    ResponseImpl& setBody(string newbody) override {
+    ResponseImpl& setBody(std::string newbody) override {
       body = newbody;
-      headers["Content-Length"] = to_string(body.length());
+      headers["Content-Length"] = std::to_string(body.length());
       return *this;
     }
 
     /**
      * Append data to the Body of the response
      */
-    ResponseImpl& appendBody(string appendbody) override {
+    ResponseImpl& appendBody(std::string appendbody) override {
       body += appendbody;
-      headers["Content-Length"] = to_string(body.length());
+      headers["Content-Length"] = std::to_string(body.length());
       return *this;
     }
     
   private:
     // HTTP Version, constant as simpleHTTP only supports HTTP/1.1
-    string version = "HTTP/1.1";
+    std::string version = "HTTP/1.1";
     // HTTP Status code, default is 200
     uint statusCode = 200;
     // HTTP Status reason, default is OK
-    string statusReason = "OK";
+    std::string statusReason = "OK";
     // HTTP headers, default headers are defined
-    unordered_map<string, string> headers = {
+    std::unordered_map<std::string, std::string> headers = {
       {"Content-Length", "0"},
       {"Content-Type", "text/plain"}, 
       {"Server", "simplehttp"}
     };
     // Body represented as string
-    string body = "";
+    std::string body = "";
   };
 } // namespace SimpleHTTP::internal
 
@@ -1835,15 +1832,15 @@ namespace SimpleHTTP::internal {
     // Response buffer
     helper::Buffer resBuffer;
     // Request Implementation object
-    unique_ptr<RequestImpl> request = make_unique<RequestImpl>();
+    std::unique_ptr<RequestImpl> request = std::make_unique<RequestImpl>();
     // Body object (default initialized to nullptr as there is no default constructor)
-    unique_ptr<BodyImpl> body = nullptr;
+    std::unique_ptr<BodyImpl> body = nullptr;
     // Response Implementation object
-    unique_ptr<ResponseImpl> response = make_unique<ResponseImpl>();
+    std::unique_ptr<ResponseImpl> response = std::make_unique<ResponseImpl>();
     // Coroutine (function) frame
     Task<bool> funcHandle;
     // Timeout when the connection is killed
-    chrono::system_clock::time_point expirationTime;
+    std::chrono::system_clock::time_point expirationTime;
   };
 } // namespace SimpleHTTP::internal
 
@@ -1876,7 +1873,7 @@ namespace SimpleHTTP {
     /**
      * Connection timeout. If exceeded without any interaction, the connection is closed
      */
-    chrono::seconds connectionTimeout = chrono::seconds(120);
+    std::chrono::seconds connectionTimeout = std::chrono::seconds(120);
   };
   
   /**
@@ -1897,6 +1894,8 @@ namespace SimpleHTTP {
      * Creates a HTTP server object
      */
     Server(ServerConfiguration config) : config(config) {};
+
+    
 
     /**
      * Adds a route to the server
@@ -1931,9 +1930,9 @@ namespace SimpleHTTP {
      * Performing another blocking IO operation will block the whole HTTP server, not just this function!
      */
     void Route(
-      string method,
-      string route,
-      function<Task<bool>(Request&, Body&, Response&)> func) {
+      std::string method,
+      std::string route,
+      std::function<Task<bool>(Request&, Body&, Response&)> func) {
       
       // Convert method toupper
       transform(method.begin(), method.end(), method.begin(),
@@ -1941,20 +1940,21 @@ namespace SimpleHTTP {
       );
 
       // Write lock the routeMap
-      unique_lock<shared_mutex> lock(routeMapLock);
+      std::unique_lock<std::shared_mutex> lock(routeMapLock);
       // Insert coroutine
       routeMap[route][method] = func;
     }
 
 
     /**
-     * Init initializes the HTTP server on a unix Socket
+     * Init initializes the HTTP server on a tcp socket
      *
-     * This function will bind the socket and start the listener
-     * if an error occurs an exception is thrown
+     * This function will prepare the server by binding the socket and starting the listener
+     *
+     * If an error occurs an exception is thrown
      */
-    void Init(string unixSockPath) {
-      fs::create_directories(fs::path(unixSockPath).parent_path());
+    void Init(std::string unixSockPath) {
+      std::filesystem::create_directories(std::filesystem::path(unixSockPath).parent_path());
       // Clean up socket, errors are ignored, if the socket cannot be cleaned up,
       // it will fail at bind() which is fine
       unlink(unixSockPath.c_str());
@@ -1962,8 +1962,8 @@ namespace SimpleHTTP {
       // Initialize core socket
       coreSocket = internal::helper::FileDescriptor(socket(AF_UNIX, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "create socket", strerror(errno)
           )
@@ -1982,8 +1982,8 @@ namespace SimpleHTTP {
       // Bind unix socket
       int res = bind(coreSocket.getfd(), (struct sockaddr *)&unSockAddr, sizeof(struct sockaddr_un));
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "bind socket", strerror(errno)
           )
@@ -1996,8 +1996,8 @@ namespace SimpleHTTP {
       // Start listener on core socket
       res = listen(coreSocket.getfd(), config.sockQueueSize);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "start listener", strerror(errno)
           )
@@ -2011,10 +2011,11 @@ namespace SimpleHTTP {
     /**
      * Init initializes the HTTP server on a tcp socket
      *
-     * This function will bind the socket and start the listener
-     * if an error occurs an exception is thrown
+     * This function will prepare the server by binding the socket and starting the listener
+     *
+     * If an error occurs an exception is thrown
      */
-    void Init(string ipAddr, u_int16_t port) {
+    void Init(std::string ipAddr, u_int16_t port) {
       // Create sockaddr_in for convenient option setting
       struct sockaddr_in inSockAddr;
       // Clean inSockAddr, 'cause maybe some weird libs
@@ -2027,15 +2028,15 @@ namespace SimpleHTTP {
       // Parse IPv4 addr and insert it to inSockAddr
       int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr.sin_addr);
       if (res==0) {
-        throw logic_error(
-          format(
+        throw std::logic_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "addr parsing", "Invalid IP-Address format"
           )
         );
       } else if (res==-1) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "addr parsing", strerror(errno)
           )
@@ -2045,8 +2046,8 @@ namespace SimpleHTTP {
       // Initialize core socket
       coreSocket = internal::helper::FileDescriptor(socket(AF_INET, SOCK_STREAM, 0));
       if (coreSocket.getfd() < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "create socket", strerror(errno)
           )
@@ -2057,8 +2058,8 @@ namespace SimpleHTTP {
       int opt = 1; // opt 1 indicates that the options should be enabled
       res = setsockopt(coreSocket.getfd(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "set socket options", strerror(errno)
           )
@@ -2068,8 +2069,8 @@ namespace SimpleHTTP {
       // Bind socket to specified addr
       res = bind(coreSocket.getfd(), (struct sockaddr *)&inSockAddr, sizeof(struct sockaddr_in));
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "bind socket", strerror(errno)
           )
@@ -2082,8 +2083,8 @@ namespace SimpleHTTP {
       // Start listener on core socket
       res = listen(coreSocket.getfd(), config.sockQueueSize);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "start listener", strerror(errno)
           )
@@ -2099,11 +2100,15 @@ namespace SimpleHTTP {
      *
      * It will handle requests from the core listener socket
      *
-     * The function can be called from multiple threads without additional synchronisation
+     * Serve() can be started from multiple threads without additional synchronisation
+     * to increase performance, however it is important to wait for all Serve() calls
+     * to exit before the Server object is destructed, otherwise this leads to undefined behavior.
      *
      * This function will run forever and block the thread, unless:
      * - the server encounters a critical error, it will then throw a runtime_error
      * - the socket is closed (e.g. with Shutdown()), it will then exit without error
+     *
+     * Calling Serve() after Shutdown() leads to undefined behavior.
      */
     void Serve() {
 
@@ -2113,8 +2118,8 @@ namespace SimpleHTTP {
       // Create epoll instance
       epollInstance = internal::helper::FileDescriptor(epoll_create1(0));
       if (epollInstance.getfd() < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "create epoll instance", strerror(errno)
           )
@@ -2129,8 +2134,8 @@ namespace SimpleHTTP {
       
       int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "add core socket to epoll instance", strerror(errno)
           )
@@ -2140,8 +2145,8 @@ namespace SimpleHTTP {
       // Create exit event descriptor
       exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
       if (exitEvent.getfd() < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "create exit eventfd", strerror(errno)
           )
@@ -2157,8 +2162,8 @@ namespace SimpleHTTP {
       
       res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, exitEvent.getfd(), &exitEventEvent);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "add exit eventfd to epoll instance", strerror(errno)
           )
@@ -2172,21 +2177,43 @@ namespace SimpleHTTP {
 
 
     /**
-     * Shutdown shuts down the server
+     * Shutdown shuts down the server asynchronously
      *
      * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
      *
-     * Shutdown() will essentially close the core socket of the server
+     * Shutdown() will asynchronously close the core socket of the server
      * This leads to the following events:
      * - Immediately, new tcp connections to the server are rejected
      * - Running sessions are closed on tcp level in the next event loop
      * - The blocking Serve() calls (in all threads) will exit after next event loop
      *
-     * Shutdown is thread-safe.
+     * After Shutdown() the Server object should not be used anymore.
+     *
+     * If sending the exit-event fails (very unlikely to happen), an exception is thrown.
      */
     void Shutdown() {
+      // Static constant defining how many times the write() syscall should be retried.
+      static const int MAX_RETRIES = 5;
+      
+      // Dummy variable as event payload
       uint64_t increment = 1;
-      write(exitEvent.getfd(), &increment, sizeof(uint64_t));
+      int res = 0;
+      int retries = 0;
+      
+      // Most application handle a Shutdown() exception very critical, therefore EINTR && EAGAIN errors
+      // are retried MAX_RETRIES-times to avoid an error escalation due to a simple interrupted syscall.
+      do {
+        res = write(exitEvent.getfd(), &increment, sizeof(uint64_t));
+      } while (retries++ < MAX_RETRIES && res<0 && (errno == EINTR || errno == EAGAIN));
+
+      if (res<0) {
+        throw std::runtime_error(
+          std::format(
+            "Failed to shutdown HTTP server ({}):\n{}",
+            "write exit event", strerror(errno)
+          )
+        );
+      }
     }
 
     
@@ -2206,13 +2233,13 @@ namespace SimpleHTTP {
     // maps to another map. This inner map associates HTTP methods (e.g., "GET") 
     // with their respective handler functions.
     // RouteMap is threadsafe because it is synchronized with the routeMapLock
-    unordered_map<string, unordered_map<string, function<Task<bool>(
+    std::unordered_map<std::string, std::unordered_map<std::string, std::function<Task<bool>(
       Request&,
       Body&,
       Response&
     )>>> routeMap;
     // Synchronizes the access to the routeMap    
-    shared_mutex routeMapLock;
+    std::shared_mutex routeMapLock;
 
     /**
      * Applies flags and options to the core socket
@@ -2230,8 +2257,8 @@ namespace SimpleHTTP {
         sizeof(config.sockBufferSize)
       );
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "set socket options", strerror(errno)
           )
@@ -2246,8 +2273,8 @@ namespace SimpleHTTP {
         sizeof(config.sockBufferSize)
       );
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "set socket options", strerror(errno)
           )
@@ -2257,8 +2284,8 @@ namespace SimpleHTTP {
       // Retrieve current flags
       int sockFlags = fcntl(coreSocket.getfd(), F_GETFL, 0);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "read socket flags", strerror(errno)
           )
@@ -2271,8 +2298,8 @@ namespace SimpleHTTP {
       // Set flags for core socket
       res = fcntl(coreSocket.getfd(), F_SETFL, sockFlags);
       if (res < 0) {
-        throw runtime_error(
-          format(
+        throw std::runtime_error(
+          std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "update socket flags", strerror(errno)
           )
@@ -2301,13 +2328,13 @@ namespace SimpleHTTP {
       //
       // If the map is destructed (e.g. error is thrown),
       // all sockets are closed automatically due to the RAII compatible FileDescriptor in the ConnectionState
-      unordered_map<int, internal::ConnectionState> conStateMap;
+      std::unordered_map<int, internal::ConnectionState> conStateMap;
 
       
       // Start main event loop
       while (1) {
         // Capture current time
-        auto now = chrono::system_clock::now();
+        auto now = std::chrono::system_clock::now();
         // Erase all connections where timeout is reached
         for (auto &con : conStateMap) {
           if (con.second.expirationTime<now) conStateMap.erase(con.first);
@@ -2317,8 +2344,8 @@ namespace SimpleHTTP {
         // The -1 timeout means that it waits indefinitely until a event is reported
         int n = epoll_wait(epollInstance.getfd(), conEvents, config.maxEventsPerLoop, -1);
         if (n < 0) {
-          throw runtime_error(
-            format(
+          throw std::runtime_error(
+            std::format(
               "Critical failure while running HTTP server ({}):\n{}",
               "wait for incoming events", strerror(errno)
             )
@@ -2349,16 +2376,16 @@ namespace SimpleHTTP {
               int res = getsockopt(conEvents[i].data.fd, SOL_SOCKET, SO_ERROR, (void *)&err, &errlen);
               // If getsockopt failed, return unknown error
               if (res < 0) {
-                throw runtime_error(
-                  format(
+                throw std::runtime_error(
+                  std::format(
                     "Critical failure while running HTTP server ({}):\n{}",
                     "error on core socket", "Unknown error"
                   )
                 );
               } else {
                 // If getsockopt succeeded, return error
-                throw runtime_error(
-                  format(
+                throw std::runtime_error(
+                  std::format(
                     "Critical failure while running HTTP server ({}):\n{}",
                     "error on core socket", strerror(err)
                   )
@@ -2416,7 +2443,7 @@ namespace SimpleHTTP {
      *
      * Returns nullopt if the connection could not be established
      */
-    optional<internal::ConnectionState> InitializeConnection(
+    std::optional<internal::ConnectionState> InitializeConnection(
       internal::helper::FileDescriptor &epollInstance, struct epoll_event &event) {
 
       // Prepare accept() attributes
@@ -2427,18 +2454,18 @@ namespace SimpleHTTP {
       // (like e.g. epoll_ctl), the socket will be cleaned up correctly at the end of the scope
       internal::helper::FileDescriptor conSocket(accept(coreSocket.getfd(), &conSockAddr, &conSockLen));
       // On failure return nullopt
-      if (conSocket.getfd() < 1) return nullopt;
+      if (conSocket.getfd() < 1) return std::nullopt;
 
       // Retrieve current socket flags
       int sockFlags = fcntl(conSocket.getfd(), F_GETFL, 0);
-      if (sockFlags < 0) return nullopt;
+      if (sockFlags < 0) return std::nullopt;
 
       // Add nonblocking flag to the flags
       sockFlags = sockFlags | O_NONBLOCK;
 
       // Set updated flag
       int res = fcntl(conSocket.getfd(), F_SETFL, sockFlags);
-      if (res < 0) return nullopt;
+      if (res < 0) return std::nullopt;
       
       // Create conEvent with EPOLLIN interest
       struct epoll_event conEvent;
@@ -2455,9 +2482,9 @@ namespace SimpleHTTP {
           // Set stage to REQ
           .stage = internal::Stage::REQ,
           // Set expiration time
-          .expirationTime = chrono::system_clock::now() + config.connectionTimeout
+          .expirationTime = std::chrono::system_clock::now() + config.connectionTimeout
         };
-      } else return nullopt;
+      } else return std::nullopt;
     }
 
 
@@ -2477,7 +2504,7 @@ namespace SimpleHTTP {
       }
 
       // Capture current time and add it to the connectionTimeout
-      state.expirationTime = chrono::system_clock::now() + config.connectionTimeout;
+      state.expirationTime = std::chrono::system_clock::now() + config.connectionTimeout;
 
       // Handle current stage
       switch (state.stage) {
@@ -2597,18 +2624,18 @@ namespace SimpleHTTP {
           // This check, performed post-serialization, ensures body parts in the buffer
           // don't affect the count, as deserializeRequest won't move the cursor beyond header size.
           if (state.reqBuffer.sizeBeforeCursor()>config.maxHeaderSize) {
-            throw runtime_error("Header size exceeds defined maximum size");
+            throw std::runtime_error("Header size exceeds defined maximum size");
           }
           // If request is not fully deserialized; continue fetching data
           if (!res) {
             continue;
           }
-        } catch (exception &e) {
+        } catch (std::exception &e) {
           (*state.response)
             .setStatusCode(400)
             .setStatusReason("Bad Request")
             .setContentType("text/plain")
-            .setBody(string(e.what())+"\n");
+            .setBody(std::string(e.what())+"\n");
           state.stage = internal::Stage::RES;
           return true;
         }
@@ -2655,13 +2682,13 @@ namespace SimpleHTTP {
         if (isChunked)
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // ChunkedBody will interpret data chunked
-          state.body = make_unique<internal::ChunkedBodyImpl>(
+          state.body = std::make_unique<internal::ChunkedBodyImpl>(
             &state.fd, config.sockBufferSize, std::move(state.reqBuffer)
           );
         else
           // Create body object and move the rest of the reqBuffer to the body readBuffer.
           // FixedBody will interpret data with a fixed length
-          state.body = make_unique<internal::FixedBodyImpl>(
+          state.body = std::make_unique<internal::FixedBodyImpl>(
             &state.fd, config.sockBufferSize, bodySize, std::move(state.reqBuffer)
           );
           
@@ -2682,8 +2709,8 @@ namespace SimpleHTTP {
      * Parsing errors will lead to an exception
      */
     bool deserializeRequest(internal::helper::Buffer &buffer, internal::RequestInternal &request) {
-      string identifier = "";
-      optional<char> c;
+      std::string identifier = "";
+      std::optional<char> c;
 
       // If method is empty, parse it
       if (request.getMethod().empty()) {
@@ -2772,13 +2799,13 @@ namespace SimpleHTTP {
           }
           // Expect ' ' after ':'
           if (c.value()!=' ') {
-            throw runtime_error(
-              "Expected space (' ') character after colon (':'). Got " + to_string(c.value())
+            throw std::runtime_error(
+              "Expected space (' ') character after colon (':'). Got " + std::to_string(c.value())
             );
           }
           
           // Read value
-          string value = "";
+          std::string value = "";
           while (1) {
             if (!(c = buffer.next()).has_value()) {
               buffer.rollback();
@@ -2814,7 +2841,7 @@ namespace SimpleHTTP {
     bool InitializeFunction(internal::ConnectionState &state) {
       {
         // Read lock the routeMap
-        shared_lock<shared_mutex> lock(routeMapLock);
+        std::shared_lock<std::shared_mutex> lock(routeMapLock);
         // Find route
         auto routeIter = routeMap.find(state.request->getPath());
         if (routeIter == routeMap.end()) {
@@ -2898,13 +2925,13 @@ namespace SimpleHTTP {
           // In order to do this, the stage remains FUNC_BODY and is processed in the next event loop
           return true;
         }
-      } catch (exception &e) {
+      } catch (std::exception &e) {
         // Exception occured on reading body
         (*state.response)
           .setStatusCode(400)
           .setStatusReason("Bad Request")
           .setContentType("text/plain")
-          .setBody("Invalid body encoding. "+string(e.what())+"\n");
+          .setBody("Invalid body encoding. "+std::string(e.what())+"\n");
         state.stage = internal::Stage::RES;
         return true;
       }
@@ -2918,7 +2945,7 @@ namespace SimpleHTTP {
     bool ProcessResponse(internal::ConnectionState &state) {
       if (state.resBuffer.empty()) {
         // Set date header to now
-        state.response->setDate(chrono::system_clock::now());
+        state.response->setDate(std::chrono::system_clock::now());
         // Serialize response
         serializeResponse(*state.response, state.resBuffer);
       }
@@ -2963,7 +2990,7 @@ namespace SimpleHTTP {
     void serializeResponse(internal::ResponseInternal &response, internal::helper::Buffer &buffer) {
       // Initialize buffer with status line 
       buffer =
-        format(
+        std::format(
           "{} {} {}\r\n",
           response.getVersion(),
           response.getStatusCode(),
@@ -2977,7 +3004,7 @@ namespace SimpleHTTP {
           continue;
         }
         // Append header to the buffer
-        buffer += format(
+        buffer += std::format(
           "{}: {}\r\n",
           header.first,
           header.second
@@ -2985,7 +3012,7 @@ namespace SimpleHTTP {
       }
 
       // Append body to the buffer
-      buffer += format(
+      buffer += std::format(
         "\r\n{}",
         response.getBody()
       );
@@ -3020,7 +3047,7 @@ namespace SimpleHTTP {
             // Add overfetched buffer
             .reqBuffer = overfetchBuffer.value(),
             // Set expiration time
-            .expirationTime = chrono::system_clock::now() + config.connectionTimeout
+            .expirationTime = std::chrono::system_clock::now() + config.connectionTimeout
           };
           return true;
         } else {
@@ -3028,7 +3055,7 @@ namespace SimpleHTTP {
           // keep connection setup to continue draining the body when more data is available
           return true;
         }
-      } catch (exception &_) {
+      } catch (std::exception &_) {
         // Exception occured while draining body
         // Close underlying connection
         return false;
