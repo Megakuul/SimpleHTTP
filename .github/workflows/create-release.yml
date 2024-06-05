@@ -32,13 +32,13 @@ jobs:
       - name: construct archive
         if: ${{ env.RELEASE_VERSION != '' }}
         run: |
-          tar -czvf ${{ env.SIMPLEHTTP_OUTPUT }} \ 
-            ${{ env.SIMPLEHTTP_SRC }} \
-            ${{ env.SIMPLEHTTP_TEST }} \
-            ${{ env.SIMPLEHTTP_MODULE }} \
-            ${{ env.SIMPLEHTTP_MODULE_LOCK }} \
-            ${{ env.SIMPLEHTTP_BUILD }} \
-            ${{ env.SIMPLEHTTP_LICENSE }}
+          tar -czvf ${{ env.SIMPLEHTTP_OUTPUT }} \
+          ${{ env.SIMPLEHTTP_SRC }} \
+          ${{ env.SIMPLEHTTP_TEST }} \
+          ${{ env.SIMPLEHTTP_MODULE }} \
+          ${{ env.SIMPLEHTTP_MODULE_LOCK }} \
+          ${{ env.SIMPLEHTTP_BUILD }} \
+          ${{ env.SIMPLEHTTP_LICENSE }}
     
       - name: create release
         if: ${{ env.RELEASE_VERSION != '' }}
