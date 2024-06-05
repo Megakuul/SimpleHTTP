@@ -21,7 +21,7 @@ jobs:
       - name: define asset paths
         if: ${{ env.RELEASE_VERSION != '' }}
         run: |
-          echo "SIMPLEHTTP_OUTPUT=simplehttp-{{ env.RELEASE_VERSION }}.tar.gz" >> $GITHUB_ENV
+          echo "SIMPLEHTTP_OUTPUT=simplehttp-${{ env.RELEASE_VERSION }}.tar.gz" >> $GITHUB_ENV
           echo "SIMPLEHTTP_SRC=simplehttp/" >> $GITHUB_ENV
           echo "SIMPLEHTTP_TEST=test/" >> $GITHUB_ENV
           echo "SIMPLEHTTP_MODULE=MODULE.bazel" >> $GITHUB_ENV
