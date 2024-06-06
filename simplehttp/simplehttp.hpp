@@ -25,6 +25,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -1954,6 +1955,17 @@ namespace SimpleHTTP {
      * If an error occurs an exception is thrown
      */
     void Init(std::string unixSockPath) {
+      // Ensure server is only initialized once
+      bool initialized = false;
+      if (!isInitialized.compare_exchange_strong(initialized, true)) {
+        throw std::logic_error(
+          std::format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "initialize", "Server is already initialized"
+          )
+        );
+      }
+      
       std::filesystem::create_directories(std::filesystem::path(unixSockPath).parent_path());
       // Clean up socket, errors are ignored, if the socket cannot be cleaned up,
       // it will fail at bind() which is fine
@@ -2016,6 +2028,16 @@ namespace SimpleHTTP {
      * If an error occurs an exception is thrown
      */
     void Init(std::string ipAddr, u_int16_t port) {
+      // Ensure server is only initialized once
+      bool initialized = false;
+      if (!isInitialized.compare_exchange_strong(initialized, true)) {
+        throw std::logic_error(
+          std::format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "initialize", "Server is already initialized"
+          )
+        );
+      }
       // Create sockaddr_in for convenient option setting
       struct sockaddr_in inSockAddr;
       // Clean inSockAddr, 'cause maybe some weird libs
@@ -2028,7 +2050,7 @@ namespace SimpleHTTP {
       // Parse IPv4 addr and insert it to inSockAddr
       int res = inet_pton(AF_INET, ipAddr.c_str(), &inSockAddr.sin_addr);
       if (res==0) {
-        throw std::logic_error(
+        throw std::runtime_error(
           std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "addr parsing", "Invalid IP-Address format"
@@ -2101,97 +2123,137 @@ namespace SimpleHTTP {
      * It will handle requests from the core listener socket
      *
      * Serve() can be started from multiple threads without additional synchronisation
-     * to increase performance, however it is important to wait for all Serve() calls
-     * to exit before the Server object is destructed, otherwise this leads to undefined behavior.
+     * to increase performance.
      *
      * This function will run forever and block the thread, unless:
-     * - the server encounters a critical error, it will then throw a runtime_error
+     * - the server encounters a critical error, it will then throw an exception
      * - the socket is closed (e.g. with Shutdown()), it will then exit without error
-     *
-     * Calling Serve() after Shutdown() leads to undefined behavior.
      */
     void Serve() {
-
       // Epoll event instance (responsible for event infrastructure)
       internal::helper::FileDescriptor epollInstance;
-
-      // Create epoll instance
-      epollInstance = internal::helper::FileDescriptor(epoll_create1(0));
-      if (epollInstance.getfd() < 0) {
-        throw std::runtime_error(
-          std::format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "create epoll instance", strerror(errno)
-          )
-        );
-      }
-      // Add core socket to epoll instance
-      // This is just used to inform the epoll_ctl which events we are interested in
-      struct epoll_event coreSockEvent;
-      // On core socket we are only interested in readable state, there is no need for any writes to it
-      coreSockEvent.events = EPOLLIN;
-      coreSockEvent.data.fd = coreSocket.getfd();
       
-      int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
-      if (res < 0) {
-        throw std::runtime_error(
-          std::format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "add core socket to epoll instance", strerror(errno)
-          )
-        );
+      {
+        // ShutdownLock is locked to ensure that serve() does not start in the shutdown process.
+        std::lock_guard<std::mutex> lock(shutdownLock);
+        // If server is already shutdown don't start serve()
+        if (isShutdown) {
+          throw std::logic_error(
+            std::format(
+              "Failed to initialize HTTP server ({}):\n{}",
+              "start", "Server is already shutdown"
+            )
+          );
+        }
+
+        // Create epoll instance
+        epollInstance = internal::helper::FileDescriptor(epoll_create1(0));
+        if (epollInstance.getfd() < 0) {
+          throw std::runtime_error(
+            std::format(
+              "Failed to initialize HTTP server ({}):\n{}",
+              "create epoll instance", strerror(errno)
+            )
+          );
+        }
+        // Add core socket to epoll instance
+        // This is just used to inform the epoll_ctl which events we are interested in
+        struct epoll_event coreSockEvent;
+        // On core socket we are only interested in readable state, there is no need for any writes to it
+        coreSockEvent.events = EPOLLIN;
+        coreSockEvent.data.fd = coreSocket.getfd();
+      
+        int res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, coreSocket.getfd(), &coreSockEvent);
+        if (res < 0) {
+          throw std::runtime_error(
+            std::format(
+              "Failed to initialize HTTP server ({}):\n{}",
+              "add core socket to epoll instance", strerror(errno)
+            )
+          );
+        }
+
+        // Create exit event descriptor
+        exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
+        if (exitEvent.getfd() < 0) {
+          throw std::runtime_error(
+            std::format(
+              "Failed to initialize HTTP server ({}):\n{}",
+              "create exit eventfd", strerror(errno)
+            )
+          );
+        }
+        // Add exit eventfd to epoll instance
+        // This is just used to inform the epoll_ctl which events we are interested in
+        struct epoll_event exitEventEvent;
+      
+        // On core socket we are only interested in readable state, there is no need for any writes to it
+        exitEventEvent.events = EPOLLIN;
+        exitEventEvent.data.fd = exitEvent.getfd();
+      
+        res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, exitEvent.getfd(), &exitEventEvent);
+        if (res < 0) {
+          throw std::runtime_error(
+            std::format(
+              "Failed to initialize HTTP server ({}):\n{}",
+              "add exit eventfd to epoll instance", strerror(errno)
+            )
+          );
+        }
+
+        // Increment instance counter after the exitEvent
+        // was added to the epoll instance. This is very important
+        // so that if the exitEvent is triggered, that it will cause
+        // the eventloop to close.
+        instanceCount++;
+
+        // Release shutdownLock for eventloop
       }
 
-      // Create exit event descriptor
-      exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
-      if (exitEvent.getfd() < 0) {
-        throw std::runtime_error(
-          std::format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "create exit eventfd", strerror(errno)
-          )
-        );
-      }
-      // Add exit eventfd to epoll instance
-      // This is just used to inform the epoll_ctl which events we are interested in
-      struct epoll_event exitEventEvent;
-      
-      // On core socket we are only interested in readable state, there is no need for any writes to it
-      exitEventEvent.events = EPOLLIN;
-      exitEventEvent.data.fd = exitEvent.getfd();
-      
-      res = epoll_ctl(epollInstance.getfd(), EPOLL_CTL_ADD, exitEvent.getfd(), &exitEventEvent);
-      if (res < 0) {
-        throw std::runtime_error(
-          std::format(
-            "Failed to initialize HTTP server ({}):\n{}",
-            "add exit eventfd to epoll instance", strerror(errno)
-          )
-        );
-      }
+      // Cleanup function to ensure instance is correctly closed
+      auto cleanup = [&](void*) {
+        // Acquire shutdown lock to synchronize correctly
+        std::lock_guard<std::mutex> lock(shutdownLock);
+        // Decrement instance counter
+        instanceCount--;
+        // Notify shutdown process if it is waiting
+        shutdownVariable.notify_one();
+      };
 
-      // Run event loop
+      // Create custom deleter that calls the cleanup call when destructed (on except / return).
+      std::unique_ptr<void, decltype(cleanup)> cleanupGuard(nullptr, cleanup);
+
+      // Run main event loop
       StartEventLoop(epollInstance);
     }
 
 
 
     /**
-     * Shutdown shuts down the server asynchronously
+     * Shutdown shuts down the server
      *
      * tcp/unix will shut down gracefully; http will be forcefully closed (no 500 status)
      *
-     * Shutdown() will asynchronously close the core socket of the server
-     * This leads to the following events:
-     * - Immediately, new tcp connections to the server are rejected
-     * - Running sessions are closed on tcp level in the next event loop
-     * - The blocking Serve() calls (in all threads) will exit after next event loop
+     * Shutdown() will send an exit event to the running server instances
+     * and wait/block until all instances are done.
      *
-     * After Shutdown() the Server object should not be used anymore.
+     * After Shutdown() the Server object cannot be used anymore
      *
-     * If sending the exit-event fails (very unlikely to happen), an exception is thrown.
+     * If an error occurs an exception is thrown
      */
     void Shutdown() {
+      // Lock shutdownlock to ensure no instance is started while processing shutdown.
+      std::unique_lock<std::mutex> lock(shutdownLock);
+      
+      if (isShutdown) {
+        throw std::logic_error(
+          std::format(
+            "Failed to shutdown HTTP server ({}):\n{}",
+            "shutdown", "Server is already shutdown"
+          )
+        );
+      }
+      
       // Static constant defining how many times the write() syscall should be retried.
       static const int MAX_RETRIES = 5;
       
@@ -2214,6 +2276,14 @@ namespace SimpleHTTP {
           )
         );
       }
+
+      // After exit event was sent, isShutdown is updated to prevent
+      // new instances from beeing launched
+      isShutdown = true;
+
+      // Shutdown variable waits until the instance count reaches 0,
+      // indicating that all instances are done.
+      shutdownVariable.wait(lock, [&]() { return instanceCount <= 0; });
     }
 
     
@@ -2240,6 +2310,26 @@ namespace SimpleHTTP {
     )>>> routeMap;
     // Synchronizes the access to the routeMap    
     std::shared_mutex routeMapLock;
+
+    // Atomic bool determining if server is initialized.
+    // Ensures that server is not initialized twice.
+    std::atomic<bool> isInitialized;
+
+    // Lock used to ensure that no new instance is created
+    // on shutdown process.
+    std::mutex shutdownLock;
+    // Variable used to wait for all instances to exit
+    // in shutdown process.
+    std::condition_variable shutdownVariable;
+    // Variable determining if the server is shutdown.
+    // Synchronized with shutdownLock.
+    bool isShutdown;
+    // Counter for running instances, synchronized with shutdownLock.
+    int instanceCount;
+    
+
+
+    
 
     /**
      * Applies flags and options to the core socket
