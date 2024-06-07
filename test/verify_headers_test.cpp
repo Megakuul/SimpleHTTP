@@ -192,9 +192,6 @@ int main(int argc, char* argv[]) {
 
   // Kill test server
   server.Shutdown();
-
-  // Wait for the server to exit
-  serverFut.get();
   
   if (allTestsPassed) {
     cout << "All tests passed." << endl;

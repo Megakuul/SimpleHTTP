@@ -4,14 +4,9 @@ on: [pull_request]
     
 jobs:
   e2e_tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
-
-    - name: Setup Clang (libc++15)
-      run: |
-        sudo apt update
-        sudo apt install -y clang-15
         
     - uses: bazel-contrib/setup-bazel@0.8.1
       with:
@@ -22,10 +17,7 @@ jobs:
         # Share repository cache between workflows.
         repository-cache: true
         bazelrc: |
-          common --enable_bzlmod
           build --color=yes
-          build --action_env CC=/usr/bin/clang-15
-          build --action_env CXX=/usr/bin/clang++-15
 
         
     - name: Verify query parameters
