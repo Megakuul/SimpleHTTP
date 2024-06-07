@@ -14,7 +14,7 @@
   },
   "localOverrideHashes": {
     "bazel_tools": "1ae69322ac3823527337acf02016e8ee95813d8d356f47060255b8956fa642f0",
-    "simplehttp": "d4d1d1a4cf0eb36c257c4876b493070f9ae6a8981c4849d63fff8c84283f0211"
+    "simplehttp": "633a449d86aa58a6556269035c609a54ad6e3feaddd49934a1c79f7723cfae1f"
   },
   "moduleDepGraph": {
     "<root>": {
@@ -34,7 +34,7 @@
     },
     "simplehttp@_": {
       "name": "simplehttp",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "key": "simplehttp@_",
       "repoName": "simplehttp",
       "executionPlatformsToRegister": [],

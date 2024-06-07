@@ -1889,12 +1889,12 @@ namespace SimpleHTTP {
     /**
      * Creates a HTTP server object
      */
-    Server() {};
+    Server() : isInitialized(false), isShutdown(false), instanceCount(0) {};
 
     /**
      * Creates a HTTP server object
      */
-    Server(ServerConfiguration config) : config(config) {};
+    Server(ServerConfiguration config) : config(config), isInitialized(false), isShutdown(false), instanceCount(0) {};
 
     
 
@@ -1978,6 +1978,17 @@ namespace SimpleHTTP {
           std::format(
             "Failed to initialize HTTP server ({}):\n{}",
             "create socket", strerror(errno)
+          )
+        );
+      }
+
+      // Create exit event descriptor
+      exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
+      if (exitEvent.getfd() < 0) {
+        throw std::runtime_error(
+          std::format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create exit eventfd", strerror(errno)
           )
         );
       }
@@ -2075,6 +2086,17 @@ namespace SimpleHTTP {
           )
         );
       }
+      
+      // Create exit event descriptor
+      exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
+      if (exitEvent.getfd() < 0) {
+        throw std::runtime_error(
+          std::format(
+            "Failed to initialize HTTP server ({}):\n{}",
+            "create exit eventfd", strerror(errno)
+          )
+        );
+      }
 
       // SO_REUSEADDR = Enable binding TIME_WAIT network ports forcefully
       int opt = 1; // opt 1 indicates that the options should be enabled
@@ -2140,7 +2162,7 @@ namespace SimpleHTTP {
         if (isShutdown) {
           throw std::logic_error(
             std::format(
-              "Failed to initialize HTTP server ({}):\n{}",
+              "Failed to start HTTP server ({}):\n{}",
               "start", "Server is already shutdown"
             )
           );
@@ -2151,7 +2173,7 @@ namespace SimpleHTTP {
         if (epollInstance.getfd() < 0) {
           throw std::runtime_error(
             std::format(
-              "Failed to initialize HTTP server ({}):\n{}",
+              "Failed to start HTTP server ({}):\n{}",
               "create epoll instance", strerror(errno)
             )
           );
@@ -2167,22 +2189,12 @@ namespace SimpleHTTP {
         if (res < 0) {
           throw std::runtime_error(
             std::format(
-              "Failed to initialize HTTP server ({}):\n{}",
+              "Failed to start HTTP server ({}):\n{}",
               "add core socket to epoll instance", strerror(errno)
             )
           );
         }
-
-        // Create exit event descriptor
-        exitEvent = internal::helper::FileDescriptor(eventfd(0, 0));
-        if (exitEvent.getfd() < 0) {
-          throw std::runtime_error(
-            std::format(
-              "Failed to initialize HTTP server ({}):\n{}",
-              "create exit eventfd", strerror(errno)
-            )
-          );
-        }
+        
         // Add exit eventfd to epoll instance
         // This is just used to inform the epoll_ctl which events we are interested in
         struct epoll_event exitEventEvent;
@@ -2195,7 +2207,7 @@ namespace SimpleHTTP {
         if (res < 0) {
           throw std::runtime_error(
             std::format(
-              "Failed to initialize HTTP server ({}):\n{}",
+              "Failed to start HTTP server ({}):\n{}",
               "add exit eventfd to epoll instance", strerror(errno)
             )
           );
@@ -2211,7 +2223,7 @@ namespace SimpleHTTP {
       }
 
       // Cleanup function to ensure instance is correctly closed
-      auto cleanup = [&](void*) {
+      auto cleanup = [&]() noexcept {
         // Acquire shutdown lock to synchronize correctly
         std::lock_guard<std::mutex> lock(shutdownLock);
         // Decrement instance counter
@@ -2220,11 +2232,17 @@ namespace SimpleHTTP {
         shutdownVariable.notify_one();
       };
 
-      // Create custom deleter that calls the cleanup call when destructed (on except / return).
-      std::unique_ptr<void, decltype(cleanup)> cleanupGuard(nullptr, cleanup);
-
-      // Run main event loop
-      StartEventLoop(epollInstance);
+      try {
+        // Run main event loop
+        StartEventLoop(epollInstance);
+      } catch (...) {
+        // Intercept stack unwinding to call instance cleanup function
+        cleanup();
+        // Rethrow exception to the caller
+        throw;
+      }
+      // Cleanup instance
+      cleanup();
     }
 
 
